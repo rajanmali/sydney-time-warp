@@ -28,6 +28,8 @@ async function loadData() {
     stripClass: view(Uint8Array, 'stripClass'),
     stripCat: view(Uint8Array, 'stripCat'),
     stripLen: view(Uint16Array, 'stripLen'),
+    stripName: view(Uint16Array, 'stripName'),
+    stripSuburb: view(Uint16Array, 'stripSuburb'),
     posGeo: view(Int16Array, 'posGeo'),
     pos: ['night', 'am', 'mid', 'pm'].map((n) => view(Int16Array, `pos_${n}`)),
     t: ['night', 'am', 'mid', 'pm'].map((n) => view(Uint16Array, `t_${n}`)),
@@ -440,10 +442,22 @@ scrub.valueAsNumber = hour * 60;
 playBtn.textContent = playing ? 'Pause' : 'Play';
 playBtn.classList.toggle('active', playing);
 
-playBtn.addEventListener('click', () => {
-  playing = !playing;
+// Pausing freezes time, which makes roads inspectable: the cursor becomes a
+// crosshair and a hint surfaces once — the interface teaches itself.
+function onPlayState() {
   playBtn.textContent = playing ? 'Pause' : 'Play';
   playBtn.classList.toggle('active', playing);
+  canvas.style.cursor = playing ? '' : 'crosshair';
+  if (playing) {
+    tooltip.style.display = 'none';
+    dismissHint();
+  } else {
+    showHint();
+  }
+}
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  onPlayState();
 });
 warpBtn.addEventListener('click', () => {
   warpTarget = warpTarget === 1 ? 0 : 1;
@@ -480,6 +494,112 @@ document.querySelectorAll('#filters button').forEach((btn) => {
   camera.zoom = Math.min(1, VIEW_HALF / (peakR * uUnit)) * userZoom;
   camera.updateProjectionMatrix();
 }
+
+// --------------------------------------------------------- hover inspector
+// Time is frozen while paused, so drive times are stable — hovering a road
+// shows its name, suburb, and the current drive time to the CBD.
+const tooltip = document.getElementById('tooltip');
+const tipRoad = tooltip.querySelector('.road');
+const tipMeta = tooltip.querySelector('.meta');
+const hintEl = document.getElementById('hint');
+const CLASS_LABEL = [
+  'Motorway', 'Motorway ramp', 'Trunk road', 'Trunk ramp',
+  'Primary road', 'Primary ramp', 'Secondary road', 'Secondary ramp',
+];
+
+const V_COUNT = data.manifest.vertexCount;
+const hoverPx = new Float32Array(V_COUNT * 2); // warped vertex positions, metres
+const hoverBB = new Float32Array(data.stripLen.length * 4); // strip bounds
+let hoverKey = '';
+function buildHoverCache() {
+  const key = `${hour.toFixed(3)}|${uniforms.uWarp.value.toFixed(2)}|${catTargets.join('')}`;
+  if (key === hoverKey) return;
+  hoverKey = key;
+  const wA = gauss(hour, PEAKS.am), wM = gauss(hour, PEAKS.mid), wP = gauss(hour, PEAKS.pm);
+  const warp = uniforms.uWarp.value, swell = uniforms.uSwell.value;
+  let base = 0;
+  for (let s = 0; s < data.stripLen.length; s++) {
+    const n = data.stripLen[s];
+    let minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+    for (let i = base; i < base + n; i++) {
+      vertexXY(i, wA, wM, wP, warp, swell, _pa);
+      hoverPx[i * 2] = _pa.x;
+      hoverPx[i * 2 + 1] = _pa.y;
+      if (_pa.x < minx) minx = _pa.x;
+      if (_pa.x > maxx) maxx = _pa.x;
+      if (_pa.y < miny) miny = _pa.y;
+      if (_pa.y > maxy) maxy = _pa.y;
+    }
+    hoverBB[s * 4] = minx; hoverBB[s * 4 + 1] = miny;
+    hoverBB[s * 4 + 2] = maxx; hoverBB[s * 4 + 3] = maxy;
+    base += n;
+  }
+}
+
+const _unproj = new THREE.Vector3();
+function pickRoad(clientX, clientY) {
+  buildHoverCache();
+  _unproj.set((clientX / innerWidth) * 2 - 1, -(clientY / innerHeight) * 2 + 1, 0);
+  _unproj.unproject(camera);
+  const mx = _unproj.x / uUnit, my = -_unproj.z / uUnit; // metres
+  const worldPerPx = (camera.right - camera.left) / (camera.zoom * innerWidth);
+  const tol = (12 * worldPerPx) / uUnit;
+
+  let best = null, bestD = tol;
+  let base = 0;
+  for (let s = 0; s < data.stripLen.length; s++) {
+    const n = data.stripLen[s];
+    const cat = data.stripCat[s];
+    if (catTargets[cat] &&
+        mx >= hoverBB[s * 4] - tol && my >= hoverBB[s * 4 + 1] - tol &&
+        mx <= hoverBB[s * 4 + 2] + tol && my <= hoverBB[s * 4 + 3] + tol) {
+      for (let i = base; i < base + n - 1; i++) {
+        const ax = hoverPx[i * 2], ay = hoverPx[i * 2 + 1];
+        const bx = hoverPx[i * 2 + 2], by = hoverPx[i * 2 + 3];
+        const dx = bx - ax, dy = by - ay;
+        const L2 = dx * dx + dy * dy;
+        const u = L2 > 0 ? Math.min(1, Math.max(0, ((mx - ax) * dx + (my - ay) * dy) / L2)) : 0;
+        const d = Math.hypot(mx - (ax + u * dx), my - (ay + u * dy));
+        if (d < bestD) { bestD = d; best = { s, i, u }; }
+      }
+    }
+    base += n;
+  }
+  return best;
+}
+
+let hintShown = false, hintTimer = 0;
+function showHint() {
+  if (hintShown) return;
+  hintShown = true;
+  hintEl.classList.add('show');
+  hintTimer = setTimeout(() => hintEl.classList.remove('show'), 5000);
+}
+function dismissHint() {
+  hintEl.classList.remove('show');
+  clearTimeout(hintTimer);
+}
+
+canvas.addEventListener('pointermove', (ev) => {
+  if (playing || ev.buttons !== 0) { tooltip.style.display = 'none'; return; }
+  const hit = pickRoad(ev.clientX, ev.clientY);
+  if (!hit) { tooltip.style.display = 'none'; return; }
+  dismissHint();
+  const { s, i, u } = hit;
+  const wA = gauss(hour, PEAKS.am), wM = gauss(hour, PEAKS.mid), wP = gauss(hour, PEAKS.pm);
+  const tcur = (j) =>
+    data.t[0][j] + wA * (data.t[1][j] - data.t[0][j]) +
+    wM * (data.t[2][j] - data.t[0][j]) + wP * (data.t[3][j] - data.t[0][j]);
+  const mins = (tcur(i) + u * (tcur(i + 1) - tcur(i))) / 60;
+  const name = data.manifest.names[data.stripName[s]] || CLASS_LABEL[data.stripClass[s]];
+  const suburb = data.manifest.suburbs[data.stripSuburb[s]];
+  tipRoad.textContent = name;
+  tipMeta.innerHTML = `${suburb ? suburb + ' · ' : ''}<b>≈ ${mins < 9.5 ? mins.toFixed(1) : Math.round(mins)} min</b> to CBD`;
+  tooltip.style.display = 'block';
+  tooltip.style.left = `${Math.min(ev.clientX + 16, innerWidth - 300)}px`;
+  tooltip.style.top = `${Math.min(ev.clientY + 16, innerHeight - 80)}px`;
+});
+canvas.addEventListener('pointerleave', () => { tooltip.style.display = 'none'; });
 
 function phaseFor(h) {
   if (h < 5) return ['Night', '#5a6376'];
@@ -519,6 +639,8 @@ function resize() {
 }
 addEventListener('resize', resize);
 resize();
+
+onPlayState();
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
