@@ -277,6 +277,7 @@ const roads = new THREE.LineSegments(
   })
 );
 scene.add(roads);
+if (params.get('debug') === 'parts') roads.visible = false;
 
 const rings = buildIsochrones(timeScale);
 scene.add(rings);
@@ -285,6 +286,142 @@ scene.add(rings);
 const cbd = makeLabel('· CBD', 30);
 cbd.position.set(0, 0.8, 0);
 scene.add(cbd);
+
+// --------------------------------------------------------- flow particles
+// Motes advected along the warped roads at time-lapse speed; they slow on
+// congested segments, so the peaks read as crawling streams.
+const N_PART = 2600;
+const stripBase = new Uint32Array(data.stripLen.length);
+{
+  let b = 0;
+  for (let s = 0; s < data.stripLen.length; s++) { stripBase[s] = b; b += data.stripLen[s]; }
+}
+const CLASS_WEIGHT = [4, 1.5, 3, 1, 2, 0.8, 1, 0.6];
+const SPEED_KMH = [95, 60, 80, 50, 60, 45, 50, 40];
+let candidates = [], candidatesKey = '';
+function refreshCandidates(targets) {
+  const key = targets.join('');
+  if (key === candidatesKey) return;
+  candidatesKey = key;
+  candidates = [];
+  for (let s = 0; s < data.stripLen.length; s++) {
+    if (!targets[data.stripCat[s]] || data.stripLen[s] < 2) continue;
+    const n = Math.ceil(CLASS_WEIGHT[data.stripClass[s]]);
+    for (let k = 0; k < n; k++) candidates.push(s);
+  }
+}
+
+// CPU mirror of the shader's position blend (sans wobble), metres.
+function vertexXY(i, wA, wM, wP, warp, swell, out) {
+  const S2 = data.manifest.posScale;
+  const gx = data.posGeo[i * 2] * S2, gy = data.posGeo[i * 2 + 1] * S2;
+  const nx = data.pos[0][i * 2] * S2, ny = data.pos[0][i * 2 + 1] * S2;
+  const ax = data.pos[1][i * 2] * S2, ay = data.pos[1][i * 2 + 1] * S2;
+  const mx = data.pos[2][i * 2] * S2, my = data.pos[2][i * 2 + 1] * S2;
+  const px = data.pos[3][i * 2] * S2, py = data.pos[3][i * 2 + 1] * S2;
+  const bx = nx + wA * (ax - nx) + wM * (mx - nx) + wP * (px - nx);
+  const by = ny + wA * (ay - ny) + wM * (my - ny) + wP * (py - ny);
+  const sx = nx + swell * (bx - nx), sy = ny + swell * (by - ny);
+  out.x = gx + (sx - gx) * warp;
+  out.y = gy + (sy - gy) * warp;
+}
+
+const parts = []; // { s, seg, frac, life, maxLife, cat, cls, dir }
+// place: drop onto a random road (a "hop" — keeps the life cycle running)
+function place(p) {
+  const s = candidates[(Math.random() * candidates.length) | 0];
+  p.s = s;
+  p.seg = (Math.random() * (data.stripLen[s] - 1)) | 0;
+  p.frac = Math.random();
+  p.cat = data.stripCat[s];
+  p.cls = data.stripClass[s];
+  p.dir = Math.random() < 0.5 ? -1 : 1;
+}
+function respawn(p) {
+  place(p);
+  p.maxLife = 4 + Math.random() * 6;
+  p.life = 0;
+}
+refreshCandidates([1, 1, 0, 0]);
+for (let i = 0; i < N_PART; i++) { parts.push({}); respawn(parts[i]); parts[i].life = Math.random() * 4; }
+
+const partPos = new Float32Array(N_PART * 3);
+const partAlpha = new Float32Array(N_PART);
+const partGeo = new THREE.BufferGeometry();
+partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
+partGeo.setAttribute('aAlpha', new THREE.BufferAttribute(partAlpha, 1));
+partGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), WORLD_R * 6);
+const partMat = new THREE.ShaderMaterial({
+  uniforms: { uPx: { value: 2.6 * Math.min(devicePixelRatio, 2) } },
+  vertexShader: /* glsl */ `
+    attribute float aAlpha;
+    uniform float uPx;
+    varying float vA;
+    void main() {
+      vA = aAlpha;
+      gl_PointSize = uPx;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    varying float vA;
+    void main() {
+      float d = length(gl_PointCoord - 0.5);
+      float a = vA * smoothstep(0.5, 0.12, d);
+      if (a < 0.004) discard;
+      gl_FragColor = vec4(vec3(1.0, 0.92, 0.78), a);
+    }
+  `,
+  transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+});
+scene.add(new THREE.Points(partGeo, partMat));
+
+const _pa = { x: 0, y: 0 }, _pb = { x: 0, y: 0 };
+function updateParticles(dt) {
+  refreshCandidates(catTargets);
+  const wA = gauss(hour, PEAKS.am);
+  const wM = gauss(hour, PEAKS.mid);
+  const wP = gauss(hour, PEAKS.pm);
+  const warp = uniforms.uWarp.value;
+  const swell = uniforms.uSwell.value;
+  // time-lapse-ish speed: fast enough to read as flow, slow enough to track
+  const lapse = (86400 / DAY_SECONDS) * 0.12;
+  for (let i = 0; i < N_PART; i++) {
+    const p = parts[i];
+    p.life += dt;
+    if (p.life > p.maxLife || !catTargets[p.cat]) { respawn(p); continue; }
+    const base = stripBase[p.s];
+    const ia = base + p.seg, ib = ia + 1;
+    vertexXY(ia, wA, wM, wP, warp, swell, _pa);
+    vertexXY(ib, wA, wM, wP, warp, swell, _pb);
+    const L = Math.max(20, Math.hypot(_pb.x - _pa.x, _pb.y - _pa.y));
+    // local congestion: how much this segment's time gradient exceeds free-flow
+    const dtN = Math.abs(data.t[0][ib] - data.t[0][ia]);
+    const tA2 = data.t[1], tM2 = data.t[2], tP2 = data.t[3], tN2 = data.t[0];
+    const tcur = (j) =>
+      tN2[j] + wA * (tA2[j] - tN2[j]) + wM * (tM2[j] - tN2[j]) + wP * (tP2[j] - tN2[j]);
+    const ratio = dtN > 0.5
+      ? Math.min(4, Math.max(1, Math.abs(tcur(ib) - tcur(ia)) / dtN))
+      : 1;
+    const v = ((SPEED_KMH[p.cls] / 3.6) * lapse) / ratio; // metres per real second
+    p.frac += (p.dir * v * dt) / L;
+    while (p.frac > 1 || p.frac < 0) {
+      p.seg += p.dir;
+      if (p.seg < 0 || p.seg >= data.stripLen[p.s] - 1) { place(p); break; } // hop
+      p.frac += p.frac > 1 ? -1 : 1;
+    }
+    const f = Math.min(1, Math.max(0, p.frac));
+    const x = (_pa.x + f * (_pb.x - _pa.x)) * uUnit;
+    const z = -(_pa.y + f * (_pb.y - _pa.y)) * uUnit;
+    partPos[i * 3] = x;
+    partPos[i * 3 + 1] = 0.4;
+    partPos[i * 3 + 2] = z;
+    const fade = Math.min(1, Math.min(p.life, p.maxLife - p.life) / 1.0);
+    partAlpha[i] = 0.5 * fade * uniforms.uCatVis.value[p.cat] * warp;
+  }
+  partGeo.attributes.position.needsUpdate = true;
+  partGeo.attributes.aAlpha.needsUpdate = true;
+}
 
 // ------------------------------------------------------------ controls
 const timeEl = document.getElementById('time-display');
@@ -400,6 +537,7 @@ renderer.setAnimationLoop(() => {
   // isochrone rings only mean something in time-space
   const w = uniforms.uWarp.value;
   for (const m of rings.userData.mats) m.opacity = m.isSpriteMaterial ? 0.55 * w : 0.5 * w;
+  updateParticles(dt);
   updateHud();
   controls.update();
   renderer.render(scene, camera);
