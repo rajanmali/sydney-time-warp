@@ -67,7 +67,7 @@ function corridorFactor(tags, id) {
     h ^= key.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  return 0.7 + 0.6 * (((h >>> 0) % 1000) / 1000);
+  return 0.55 + 0.9 * (((h >>> 0) % 1000) / 1000);
 }
 
 const R = 6371000;
@@ -101,51 +101,91 @@ const ways = raw.elements.filter(
 );
 console.log(`${ways.length} usable ways`);
 
-// --- 1. Find junctions: nodes used by ≥2 ways, plus every way's endpoints ---
-const nodeUse = new Map();
+// --- 1. Cluster nodes onto a ~75 m grid ---
+// Dual carriageways are two parallel one-way OSM ways ~10–40 m apart. Snapping
+// nodes to clusters makes both carriageways share junctions (so they get the
+// same drive times) and lets us dedupe the parallel edges — each road renders
+// as one path.
+const SNAP = 75; // metres
+const nodePos = new Map(); // node id -> {lat, lon}
 for (const w of ways)
-  for (const id of w.nodes) nodeUse.set(id, (nodeUse.get(id) || 0) + 1);
+  w.nodes.forEach((id, i) => { if (!nodePos.has(id)) nodePos.set(id, w.geometry[i]); });
 
-const isJunction = (w, i) =>
-  i === 0 || i === w.nodes.length - 1 || nodeUse.get(w.nodes[i]) >= 2;
+const clusterCache = new Map(); // node id -> cluster key
+function clusterOf(id) {
+  let c = clusterCache.get(id);
+  if (c === undefined) {
+    const q = planar(nodePos.get(id));
+    c = `${Math.round(q.x / SNAP)}_${Math.round(q.y / SNAP)}`;
+    clusterCache.set(id, c);
+  }
+  return c;
+}
 
-// --- 2. Split ways into edges between junctions ---
-// Edge: { a, b: junction node ids, cls, cat, len, pts, cum,
+// Cluster usage: once per way visit (consecutive nodes in the same cluster
+// count as a single visit). A cluster visited ≥2 times is a junction.
+const clusterUse = new Map();
+for (const w of ways) {
+  let prev = null;
+  for (const id of w.nodes) {
+    const c = clusterOf(id);
+    if (c !== prev) clusterUse.set(c, (clusterUse.get(c) || 0) + 1);
+    prev = c;
+  }
+}
+
+// --- 2. Split ways into edges between junction clusters, dedupe parallels ---
+// Edge: { a, b: cluster keys, cls, cat, len, pts, cum,
 //         tt: per-profile traversal seconds with spatial congestion applied }
 const edges = [];
-const junctionPos = new Map(); // node id -> {lat, lon}
+const junctionPos = new Map(); // cluster key -> {lat, lon}
+const seenEdge = new Set();
+let duplicates = 0;
 
 for (const w of ways) {
   const cls = CLASS_INDEX.get(w.tags.highway);
   const cat = categoryOf(w.tags);
   const corridor = corridorFactor(w.tags, w.id);
   let start = 0;
+  let prevC = clusterOf(w.nodes[0]);
   for (let i = 1; i < w.nodes.length; i++) {
-    if (!isJunction(w, i)) continue;
+    const cI = clusterOf(w.nodes[i]);
+    const isLast = i === w.nodes.length - 1;
+    const entering = cI !== prevC && clusterUse.get(cI) >= 2;
+    prevC = cI;
+    if (!entering && !isLast) continue;
+
+    const a = clusterOf(w.nodes[start]), b = cI;
     const pts = w.geometry.slice(start, i + 1);
-    if (pts.length >= 2) {
-      const cum = [0];
-      for (let j = 1; j < pts.length; j++)
-        cum.push(cum[j - 1] + haversine(pts[j - 1], pts[j]));
-      const len = cum[cum.length - 1];
-      if (len > 0) {
-        const a = w.nodes[start], b = w.nodes[i];
-        const mid = pts[Math.floor(pts.length / 2)];
-        const spatial = ringFactor(haversine(mid, CBD) / 1000) * corridor;
-        const freeFlow = len / (SPEED[cls] / 3.6);
-        const tt = PROFILE_NAMES.map((n) => {
-          const mult = Math.max(1, 1 + (PROFILES[n][cls] - 1) * spatial);
-          return freeFlow * mult;
-        });
-        edges.push({ a, b, cls, cat, len, pts, cum, tt });
-        junctionPos.set(a, pts[0]);
-        junctionPos.set(b, pts[pts.length - 1]);
-      }
-    }
     start = i;
+    if (a === b || pts.length < 2) continue;
+
+    const key = a < b ? `${a}|${b}|${cls}` : `${b}|${a}|${cls}`;
+    if (seenEdge.has(key)) { duplicates++; continue; } // opposite carriageway
+    seenEdge.add(key);
+
+    const cum = [0];
+    for (let j = 1; j < pts.length; j++)
+      cum.push(cum[j - 1] + haversine(pts[j - 1], pts[j]));
+    const len = cum[cum.length - 1];
+    if (len === 0) continue;
+
+    const mid = pts[Math.floor(pts.length / 2)];
+    const spatial = ringFactor(haversine(mid, CBD) / 1000) * corridor;
+    const freeFlow = len / (SPEED[cls] / 3.6);
+    const tt = PROFILE_NAMES.map((n) => {
+      const mult = Math.max(1, 1 + (PROFILES[n][cls] - 1) * spatial);
+      return freeFlow * mult;
+    });
+    edges.push({ a, b, cls, cat, len, pts, cum, tt });
+    junctionPos.set(a, pts[0]);
+    junctionPos.set(b, pts[pts.length - 1]);
   }
 }
-console.log(`${edges.length} edges, ${junctionPos.size} junctions`);
+console.log(
+  `${edges.length} edges, ${junctionPos.size} junctions ` +
+  `(${duplicates} parallel carriageway edges merged)`
+);
 
 // --- 3. Adjacency + Dijkstra (binary heap) per profile ---
 const ids = [...junctionPos.keys()];
