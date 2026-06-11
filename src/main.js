@@ -30,6 +30,10 @@ async function loadData() {
     tA: view(Uint16Array, 't_am'),
     tM: view(Uint16Array, 't_mid'),
     tP: view(Uint16Array, 't_pm'),
+    coastStripLen: view(Uint16Array, 'coastStripLen'),
+    coastTheta: view(Float32Array, 'coastTheta'),
+    coastDist: view(Uint16Array, 'coastDist'),
+    coastT: ['night', 'am', 'mid', 'pm'].map((n) => view(Uint16Array, `coastT_${n}`)),
   };
 }
 
@@ -243,6 +247,24 @@ const roads = new THREE.LineSegments(
   })
 );
 scene.add(roads);
+
+// Land/water border, warped with the network — faint gray geographic anchor.
+const coast = new THREE.LineSegments(
+  buildStrips({
+    stripLen: data.coastStripLen,
+    theta: data.coastTheta,
+    dist: data.coastDist,
+    times: data.coastT,
+    meta: null,
+    distUnit: data.manifest.distUnit,
+  }),
+  new THREE.ShaderMaterial({
+    uniforms, vertexShader, fragmentShader,
+    defines: { FLAT_COAST: 1 },
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+  })
+);
+scene.add(coast);
 
 const rings = buildIsochrones(timeScale);
 scene.add(rings);
