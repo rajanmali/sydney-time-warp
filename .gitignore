@@ -1,0 +1,12 @@
+# Raw downloaded data (large, refetchable)
+data/raw/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
