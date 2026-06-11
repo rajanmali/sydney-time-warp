@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11T12:25:18.367Z",
+  "generated": "2026-06-11T12:27:39.130Z",
   "source": "OpenStreetMap via Overpass API (ODbL)",
   "cbd": {
     "lat": -33.8688,
@@ -33,7 +33,7 @@
   "coastVertexCount": 2222,
   "distUnit": 4,
   "maxDistance": 61732,
-  "maxTime": 5862,
+  "maxTime": 5725,
   "layout": {
     "stripClass": {
       "offset": 0,

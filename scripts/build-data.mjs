@@ -67,7 +67,7 @@ function corridorFactor(tags, id) {
     h ^= key.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  return 0.7 + 0.6 * (((h >>> 0) % 1000) / 1000);
+  return 0.55 + 0.9 * (((h >>> 0) % 1000) / 1000);
 }
 
 const R = 6371000;
