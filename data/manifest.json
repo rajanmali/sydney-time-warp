@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11T08:22:39.193Z",
+  "generated": "2026-06-11T12:25:18.367Z",
   "source": "OpenStreetMap via Overpass API (ODbL)",
   "cbd": {
     "lat": -33.8688,
@@ -27,78 +27,78 @@
     "mid",
     "pm"
   ],
-  "stripCount": 37757,
-  "vertexCount": 207307,
+  "stripCount": 28277,
+  "vertexCount": 114124,
   "coastStripCount": 279,
   "coastVertexCount": 2222,
   "distUnit": 4,
   "maxDistance": 61732,
-  "maxTime": 6540,
+  "maxTime": 5862,
   "layout": {
     "stripClass": {
       "offset": 0,
-      "length": 37757
+      "length": 28277
     },
     "stripCat": {
-      "offset": 37760,
-      "length": 37757
+      "offset": 28280,
+      "length": 28277
     },
     "stripLen": {
-      "offset": 75520,
-      "length": 37757
+      "offset": 56560,
+      "length": 28277
     },
     "theta": {
-      "offset": 151036,
-      "length": 207307
+      "offset": 113116,
+      "length": 114124
     },
     "distGeo": {
-      "offset": 980264,
-      "length": 207307
+      "offset": 569612,
+      "length": 114124
     },
     "t_night": {
-      "offset": 1394880,
-      "length": 207307
+      "offset": 797860,
+      "length": 114124
     },
     "t_am": {
-      "offset": 1809496,
-      "length": 207307
+      "offset": 1026108,
+      "length": 114124
     },
     "t_mid": {
-      "offset": 2224112,
-      "length": 207307
+      "offset": 1254356,
+      "length": 114124
     },
     "t_pm": {
-      "offset": 2638728,
-      "length": 207307
+      "offset": 1482604,
+      "length": 114124
     },
     "coastStripLen": {
-      "offset": 3053344,
+      "offset": 1710852,
       "length": 279
     },
     "coastTheta": {
-      "offset": 3053904,
+      "offset": 1711412,
       "length": 2222
     },
     "coastDist": {
-      "offset": 3062792,
+      "offset": 1720300,
       "length": 2222
     },
     "coastT_night": {
-      "offset": 3067236,
+      "offset": 1724744,
       "length": 2222
     },
     "coastT_am": {
-      "offset": 3071680,
+      "offset": 1729188,
       "length": 2222
     },
     "coastT_mid": {
-      "offset": 3076124,
+      "offset": 1733632,
       "length": 2222
     },
     "coastT_pm": {
-      "offset": 3080568,
+      "offset": 1738076,
       "length": 2222
     }
   },
-  "byteLength": 3085012
+  "byteLength": 1742520
 }
