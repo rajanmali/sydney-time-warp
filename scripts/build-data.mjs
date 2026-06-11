@@ -24,15 +24,51 @@ const CLASS_INDEX = new Map(CLASSES.map((c, i) => [c, i]));
 // Free-flow speed, km/h, by class index.
 const SPEED = [95, 60, 80, 50, 60, 45, 50, 40];
 
-// Travel-time multipliers per profile, by class index. Motorways and arterials
-// degrade most in the peaks; the PM peak hits surface streets slightly harder.
+// Peak travel-time multipliers per profile, by class index. These are the
+// *ceiling* for each class; the multiplier actually applied to an edge is
+// scaled by where it sits (ring distance from the CBD) and which corridor it
+// belongs to, so congestion balloons specific corridors instead of inflating
+// the whole map uniformly.
 const PROFILES = {
   night: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-  am:    [2.1, 1.8, 2.0, 1.7, 1.95, 1.6, 1.75, 1.5],
-  mid:   [1.3, 1.2, 1.25, 1.2, 1.25, 1.15, 1.2, 1.15],
-  pm:    [2.0, 1.75, 1.9, 1.65, 1.9, 1.6, 1.85, 1.55],
+  am:    [2.4, 2.0, 2.3, 1.9, 2.25, 1.8, 2.0, 1.7],
+  mid:   [1.35, 1.25, 1.3, 1.25, 1.3, 1.2, 1.25, 1.2],
+  pm:    [2.3, 1.95, 2.2, 1.85, 2.2, 1.8, 2.1, 1.75],
 };
 const PROFILE_NAMES = ['night', 'am', 'mid', 'pm'];
+
+// NSW route categories from OSM ref tags: M (motorways), A (arterials),
+// B (regional), and everything unsigned.
+const CATEGORIES = ['M', 'A', 'B', 'other'];
+function categoryOf(tags) {
+  const ref = tags.ref || '';
+  if (/\bM\d/.test(ref)) return 0;
+  if (/\bA\d/.test(ref)) return 1;
+  if (/\bB\d/.test(ref)) return 2;
+  if (tags.highway.startsWith('motorway')) return 0; // unsigned motorway ramps etc.
+  return 3;
+}
+
+// Where congestion bites: a ring profile peaking in the 6–18 km middle
+// suburbs, easing off in the compact core and the metro fringe.
+const smooth = (a, b, x) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
+const ringFactor = (dKm) =>
+  0.3 + 0.7 * (smooth(1.5, 6, dKm) * (1 - smooth(18, 45, dKm)));
+
+// Deterministic per-corridor variation so parallel routes degrade
+// differently — this is what makes the warp lumpy rather than concentric.
+function corridorFactor(tags, id) {
+  const key = tags.ref || tags.name || String(id);
+  let h = 2166136261;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return 0.7 + 0.6 * (((h >>> 0) % 1000) / 1000);
+}
 
 const R = 6371000;
 const rad = (d) => (d * Math.PI) / 180;
@@ -74,12 +110,15 @@ const isJunction = (w, i) =>
   i === 0 || i === w.nodes.length - 1 || nodeUse.get(w.nodes[i]) >= 2;
 
 // --- 2. Split ways into edges between junctions ---
-// Edge: { a, b: junction node ids, cls, len, pts: [{lat,lon}...], cum: [m...] }
+// Edge: { a, b: junction node ids, cls, cat, len, pts, cum,
+//         tt: per-profile traversal seconds with spatial congestion applied }
 const edges = [];
 const junctionPos = new Map(); // node id -> {lat, lon}
 
 for (const w of ways) {
   const cls = CLASS_INDEX.get(w.tags.highway);
+  const cat = categoryOf(w.tags);
+  const corridor = corridorFactor(w.tags, w.id);
   let start = 0;
   for (let i = 1; i < w.nodes.length; i++) {
     if (!isJunction(w, i)) continue;
@@ -91,7 +130,14 @@ for (const w of ways) {
       const len = cum[cum.length - 1];
       if (len > 0) {
         const a = w.nodes[start], b = w.nodes[i];
-        edges.push({ a, b, cls, len, pts, cum });
+        const mid = pts[Math.floor(pts.length / 2)];
+        const spatial = ringFactor(haversine(mid, CBD) / 1000) * corridor;
+        const freeFlow = len / (SPEED[cls] / 3.6);
+        const tt = PROFILE_NAMES.map((n) => {
+          const mult = Math.max(1, 1 + (PROFILES[n][cls] - 1) * spatial);
+          return freeFlow * mult;
+        });
+        edges.push({ a, b, cls, cat, len, pts, cum, tt });
         junctionPos.set(a, pts[0]);
         junctionPos.set(b, pts[pts.length - 1]);
       }
@@ -119,7 +165,7 @@ for (let i = 0; i < N; i++) {
 }
 console.log(`Source junction ${ids[srcIdx]}, ${Math.round(srcBest)} m from CBD`);
 
-function dijkstra(mult) {
+function dijkstra(profileIdx) {
   const dist = new Float64Array(N).fill(Infinity);
   dist[srcIdx] = 0;
   // binary min-heap of [time, node]
@@ -154,8 +200,7 @@ function dijkstra(mult) {
     const [t, u] = pop();
     if (t > dist[u]) continue;
     for (const { to, e } of adj[u]) {
-      const edge = edges[e];
-      const w = (edge.len / (SPEED[edge.cls] / 3.6)) * mult[edge.cls];
+      const w = edges[e].tt[profileIdx];
       if (t + w < dist[to]) { dist[to] = t + w; push([t + w, to]); }
     }
   }
@@ -163,10 +208,10 @@ function dijkstra(mult) {
 }
 
 const times = {};
-for (const name of PROFILE_NAMES) {
+PROFILE_NAMES.forEach((name, k) => {
   console.log(`Dijkstra: ${name}`);
-  times[name] = dijkstra(PROFILES[name]);
-}
+  times[name] = dijkstra(k);
+});
 
 // --- 4. Emit per-vertex records for reachable edges ---
 const reachable = (e) =>
@@ -177,6 +222,7 @@ const totalVerts = kept.reduce((s, e) => s + e.pts.length, 0);
 console.log(`${kept.length} reachable edges, ${totalVerts} vertices`);
 
 const stripClass = new Uint8Array(kept.length);
+const stripCat = new Uint8Array(kept.length);
 const stripLen = new Uint16Array(kept.length);
 const theta = new Float32Array(totalVerts);
 const distGeo = new Uint16Array(totalVerts); // metres / 4
@@ -185,6 +231,7 @@ const tArr = PROFILE_NAMES.map(() => new Uint16Array(totalVerts)); // seconds
 let v = 0, maxT = 0, maxD = 0;
 kept.forEach((e, s) => {
   stripClass[s] = e.cls;
+  stripCat[s] = e.cat;
   stripLen[s] = e.pts.length;
   const ia = idx.get(e.a), ib = idx.get(e.b);
   for (let j = 0; j < e.pts.length; j++) {
@@ -195,7 +242,7 @@ kept.forEach((e, s) => {
     maxD = Math.max(maxD, d);
     for (let k = 0; k < PROFILE_NAMES.length; k++) {
       const name = PROFILE_NAMES[k];
-      const tau = (e.len / (SPEED[e.cls] / 3.6)) * PROFILES[name][e.cls];
+      const tau = e.tt[k];
       const along = e.len > 0 ? e.cum[j] / e.len : 0;
       const t = Math.min(
         times[name][ia] + tau * along,
@@ -208,13 +255,97 @@ kept.forEach((e, s) => {
   }
 });
 
-// --- 5. Write binary (sections, each aligned) + manifest ---
+// --- 5. Coastline: warp it with the roads so the land border balloons too ---
+// Each coast vertex borrows the drive times of its nearest road junction
+// (plus a small access penalty), so the shoreline deforms coherently with
+// the network around it.
+const coastRaw = JSON.parse(
+  await readFile(new URL('../data/raw/sydney-coast.json', import.meta.url), 'utf8')
+);
+const coastWays = coastRaw.elements.filter((e) => e.type === 'way' && e.geometry);
+
+// grid index over junctions, planar metres, 1.5 km cells
+const CELL = 1500;
+const grid = new Map();
+const cellKey = (cx, cy) => cx * 100000 + cy;
+for (const [id, p] of junctionPos) {
+  if (!isFinite(times.night[idx.get(id)])) continue;
+  const q = planar(p);
+  const k = cellKey(Math.floor(q.x / CELL), Math.floor(q.y / CELL));
+  if (!grid.has(k)) grid.set(k, []);
+  grid.get(k).push({ id, x: q.x, y: q.y });
+}
+function nearestJunction(q) {
+  const cx = Math.floor(q.x / CELL), cy = Math.floor(q.y / CELL);
+  let best = null, bestD = Infinity;
+  for (let ring = 0; ring <= 5; ring++) {
+    for (let dx = -ring; dx <= ring; dx++) {
+      for (let dy = -ring; dy <= ring; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
+        for (const j of grid.get(cellKey(cx + dx, cy + dy)) || []) {
+          const d = Math.hypot(j.x - q.x, j.y - q.y);
+          if (d < bestD) { bestD = d; best = j; }
+        }
+      }
+    }
+    if (best && bestD < ring * CELL) break; // can't be beaten by farther rings
+  }
+  return best ? { id: best.id, d: bestD } : null;
+}
+
+const COAST_MIN_SPACING = 120; // metres — simplify dense coastline geometry
+const coastStrips = [];
+for (const w of coastWays) {
+  const pts = [];
+  let last = null;
+  for (const g of w.geometry) {
+    if (!last || haversine(last, g) >= COAST_MIN_SPACING) { pts.push(g); last = g; }
+  }
+  const end = w.geometry[w.geometry.length - 1];
+  if (last !== end) pts.push(end);
+  if (pts.length >= 2) coastStrips.push(pts);
+}
+const coastVerts = coastStrips.reduce((s, p) => s + p.length, 0);
+console.log(`${coastStrips.length} coast strips, ${coastVerts} vertices`);
+
+const coastStripLen = new Uint16Array(coastStrips.length);
+const coastTheta = new Float32Array(coastVerts);
+const coastDist = new Uint16Array(coastVerts);
+const coastT = PROFILE_NAMES.map(() => new Uint16Array(coastVerts));
+
+let cv = 0;
+coastStrips.forEach((pts, s) => {
+  coastStripLen[s] = pts.length;
+  for (const g of pts) {
+    const q = planar(g);
+    coastTheta[cv] = Math.atan2(q.x, q.y);
+    const dGeo = Math.hypot(q.x, q.y);
+    coastDist[cv] = Math.min(65535, Math.round(dGeo / 4));
+    const near = nearestJunction(q);
+    for (let k = 0; k < PROFILE_NAMES.length; k++) {
+      const name = PROFILE_NAMES[k];
+      // access penalty at suburban speed; pseudo-time fallback far from roads
+      const t = near
+        ? times[name][idx.get(near.id)] + near.d / (40 / 3.6)
+        : dGeo / (55 / 3.6);
+      coastT[k][cv] = Math.min(65535, Math.round(t));
+    }
+    cv++;
+  }
+});
+
+// --- 6. Write binary (sections, each aligned) + manifest ---
 const sections = [
   ['stripClass', stripClass],
+  ['stripCat', stripCat],
   ['stripLen', stripLen],
   ['theta', theta],
   ['distGeo', distGeo],
   ...PROFILE_NAMES.map((n, k) => [`t_${n}`, tArr[k]]),
+  ['coastStripLen', coastStripLen],
+  ['coastTheta', coastTheta],
+  ['coastDist', coastDist],
+  ...PROFILE_NAMES.map((n, k) => [`coastT_${n}`, coastT[k]]),
 ];
 const align = (n) => Math.ceil(n / 4) * 4;
 let offset = 0;
@@ -234,10 +365,13 @@ const manifest = {
   source: 'OpenStreetMap via Overpass API (ODbL)',
   cbd: CBD,
   classes: CLASSES,
+  categories: CATEGORIES,
   profiles: PROFILE_NAMES,
   stripCount: kept.length,
   vertexCount: totalVerts,
-  distUnit: 4,            // distGeo is metres / 4
+  coastStripCount: coastStrips.length,
+  coastVertexCount: coastVerts,
+  distUnit: 4,            // distGeo/coastDist are metres / 4
   maxDistance: Math.round(maxD),
   maxTime: Math.round(maxT), // seconds
   layout,

@@ -61,6 +61,13 @@
   #clock .factor { margin-top: 6px; font-size: 11px; letter-spacing: .12em; color: var(--dim); }
   #clock .factor b { color: var(--bone); font-weight: 500; }
 
+  /* ---- route filter, bottom left ---- */
+  #filters { bottom: 168px; left: 32px; display: flex; align-items: center; gap: 8px; }
+  #filters .label { font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--dim); margin-right: 6px; }
+  #filters button { padding: 6px 11px; color: var(--dim); }
+  #filters button.active { color: var(--amber); }
+
   /* ---- legend, bottom left ---- */
   #legend { bottom: 96px; left: 32px; font-size: 10px; letter-spacing: .14em;
     text-transform: uppercase; color: var(--dim); user-select: none; }
@@ -145,6 +152,14 @@
     <div class="time" id="time-display">07:30</div>
     <div class="phase" id="phase-display">Morning peak</div>
     <div class="factor" id="factor-display">network <b>×1.0</b> free-flow</div>
+  </div>
+
+  <div id="filters" class="hud reveal">
+    <div class="label">Routes</div>
+    <button data-cat="0" title="Signed motorways (M1, M2, M4…)">M</button>
+    <button data-cat="1" title="Signed arterials (A1, A3, A4…)">A</button>
+    <button data-cat="2" title="Signed regional roads (B…)">B</button>
+    <button data-cat="3" title="Unsigned trunk/primary/secondary roads">Local</button>
   </div>
 
   <div id="legend" class="hud reveal">
