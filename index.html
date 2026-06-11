@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sydney Time Warp — a day where distance is drive time</title>
-<meta name="description" content="Sydney's road network, warped so that distance from the CBD equals drive time. Watch rush hour make the city swell." />
+<title>Time Warp — a day where distance is drive time · Sydney, Melbourne, Brisbane</title>
+<meta name="description" content="Australian city road networks, warped so that distance from the CBD equals drive time. Watch rush hour make the city swell." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Six+Caps&family=Spline+Sans+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
@@ -38,9 +38,12 @@
   #title { top: 28px; left: 32px; user-select: none; }
   #title h1 {
     font-family: 'Six Caps', sans-serif; font-weight: 400;
-    font-size: clamp(64px, 9vw, 124px); line-height: .82; letter-spacing: .02em;
-    color: var(--bone);
+    font-size: clamp(44px, 6vw, 92px); line-height: .95; letter-spacing: .03em;
+    color: var(--bone); white-space: nowrap;
   }
+  #cities { margin-top: 10px; display: flex; gap: 8px; }
+  #cities button { padding: 6px 12px; color: var(--dim); }
+  #cities button.active { color: var(--amber); border-color: var(--amber); }
   #title .sub {
     margin-top: 14px; max-width: 30ch;
     font-size: 11px; font-weight: 300; letter-spacing: .14em; text-transform: uppercase;
@@ -168,8 +171,13 @@
   <div id="hint">time frozen — touch a road</div>
 
   <header id="title" class="hud reveal">
-    <h1>SYD—<br>NEY</h1>
-    <p class="sub">A day in Sydney, warped so that <em>distance&nbsp;=&nbsp;drive&nbsp;time</em> from the CBD. The city swells in the peaks, contracts at night.</p>
+    <h1 id="city-name">SYDNEY</h1>
+    <nav id="cities">
+      <button data-city="sydney" class="active">SYD</button>
+      <button data-city="melbourne">MEL</button>
+      <button data-city="brisbane">BNE</button>
+    </nav>
+    <p class="sub">A day in <span id="city-sub">Sydney</span>, warped so that <em>distance&nbsp;=&nbsp;drive&nbsp;time</em> from the CBD. The city swells in the peaks, contracts at night.</p>
   </header>
 
   <div id="clock" class="hud reveal">

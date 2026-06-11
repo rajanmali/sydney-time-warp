@@ -1,7 +1,8 @@
-// Sydney Time Warp — roads positioned so distance from the CBD = drive time.
+// Time Warp — roads positioned so distance from the CBD = drive time.
 // The pipeline precomputes an elastic (diffusion-warped) embedding per
 // congestion profile; the vertex shader blends those embeddings through the
 // day, so the city deforms like a soft sheet. JS only advances the clock.
+// Sydney / Melbourne / Brisbane, switchable at runtime.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -14,12 +15,13 @@ const PEAKS = { am: [8.25, 1.4], mid: [13.0, 2.8], pm: [17.5, 1.7] };
 const gauss = (h, [c, s]) => Math.exp(-0.5 * ((h - c) / s) ** 2);
 
 const params = new URLSearchParams(location.search);
+const CITY_SUB = { sydney: 'Sydney', melbourne: 'Melbourne', brisbane: 'Brisbane' };
 
 // ---------------------------------------------------------------- data
-async function loadData() {
+async function loadData(city) {
   const [manifest, bin] = await Promise.all([
-    fetch('data/manifest.json').then((r) => r.json()),
-    fetch('data/sydney.bin').then((r) => r.arrayBuffer()),
+    fetch(`data/${city}.json`).then((r) => r.json()),
+    fetch(`data/${city}.bin`).then((r) => r.arrayBuffer()),
   ]);
   const view = (Type, name) =>
     new Type(bin, manifest.layout[name].offset, manifest.layout[name].length);
@@ -40,8 +42,8 @@ async function loadData() {
 // Strips → LineSegments. position = (geoX, geoY, meta) in metres,
 // meta = class + 16 × category. aP01 = night/am positions, aP23 = mid/pm,
 // aTimes = 4 profile drive-times (for colour).
-function buildRoads(data) {
-  const { stripClass, stripCat, stripLen, posGeo, pos, t, manifest } = data;
+function buildRoads(d) {
+  const { stripClass, stripCat, stripLen, posGeo, pos, t, manifest } = d;
   const S = manifest.posScale;
   let segVerts = 0;
   for (let s = 0; s < stripLen.length; s++) segVerts += (stripLen[s] - 1) * 2;
@@ -148,31 +150,31 @@ const fragmentShader = /* glsl */ `
 // ----------------------------------------------------------- hud bits
 function makeLabel(text, size = 26) {
   const pad = 8;
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
+  const canvas2 = document.createElement('canvas');
+  const ctx = canvas2.getContext('2d');
   ctx.font = `300 ${size}px 'Spline Sans Mono', monospace`;
-  canvas.width = Math.ceil(ctx.measureText(text).width) + pad * 2;
-  canvas.height = size + pad * 2;
-  const c2 = canvas.getContext('2d');
+  canvas2.width = Math.ceil(ctx.measureText(text).width) + pad * 2;
+  canvas2.height = size + pad * 2;
+  const c2 = canvas2.getContext('2d');
   c2.font = `300 ${size}px 'Spline Sans Mono', monospace`;
   c2.fillStyle = 'rgba(232, 228, 216, 0.6)';
   c2.textBaseline = 'middle';
-  c2.fillText(text, pad, canvas.height / 2);
-  const tex = new THREE.CanvasTexture(canvas);
+  c2.fillText(text, pad, canvas2.height / 2);
+  const tex = new THREE.CanvasTexture(canvas2);
   tex.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(
     new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })
   );
   const h = 3.2;
-  sprite.scale.set((h * canvas.width) / canvas.height, h, 1);
+  sprite.scale.set((h * canvas2.width) / canvas2.height, h, 1);
   return sprite;
 }
 
-function buildIsochrones(timeScale) {
+function buildIsochrones(scale) {
   const group = new THREE.Group();
   const mats = [];
   for (const min of [15, 30, 45, 60, 90, 120]) {
-    const r = min * 60 * timeScale;
+    const r = min * 60 * scale;
     const pts = [];
     for (let i = 0; i <= 128; i++) {
       const a = (i / 128) * Math.PI * 2;
@@ -185,7 +187,7 @@ function buildIsochrones(timeScale) {
     group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
 
     const label = makeLabel(`${min} min`);
-    const a = Math.PI * 0.78; // labels up the NE radial
+    const a = Math.PI * 0.78;
     label.position.set(Math.sin(a) * r, 0.5, -Math.cos(a) * r);
     label.material.opacity = 0.55;
     mats.push(label.material);
@@ -195,43 +197,7 @@ function buildIsochrones(timeScale) {
   return group;
 }
 
-// ----------------------------------------------------------------- app
-const data = await loadData();
-document.getElementById('loader-msg').textContent =
-  `Plotting ${data.manifest.vertexCount.toLocaleString()} points`;
-
-const S = data.manifest.posScale;
-const uUnit = WORLD_R / data.manifest.dRef;   // world units per metre
-const timeScale = WORLD_R / data.manifest.tRef; // world units per second (rings)
-
-// Mean profile ratios for the HUD "×N free-flow" readout.
-let sN = 0, sA = 0, sM = 0, sP = 0;
-for (let i = 0; i < data.t[0].length; i += 23) {
-  if (data.t[0][i] < 30) continue;
-  sN += data.t[0][i]; sA += data.t[1][i]; sM += data.t[2][i]; sP += data.t[3][i];
-}
-const meanRatio = { am: sA / sN, mid: sM / sN, pm: sP / sN };
-
-// Per-category reach (metres) under each profile, for the static framing.
-const catMax = Array.from({ length: 4 }, () => ({ rGeo: 0, rN: 0, rA: 0, rP: 0 }));
-{
-  let base = 0;
-  for (let s = 0; s < data.stripLen.length; s++) {
-    const m = catMax[data.stripCat[s]];
-    for (let i = base; i < base + data.stripLen[s]; i++) {
-      const rg = Math.hypot(data.posGeo[i * 2], data.posGeo[i * 2 + 1]) * S;
-      if (rg > m.rGeo) m.rGeo = rg;
-      const rn = Math.hypot(data.pos[0][i * 2], data.pos[0][i * 2 + 1]) * S;
-      if (rn > m.rN) m.rN = rn;
-      const ra = Math.hypot(data.pos[1][i * 2], data.pos[1][i * 2 + 1]) * S;
-      if (ra > m.rA) m.rA = ra;
-      const rp = Math.hypot(data.pos[3][i * 2], data.pos[3][i * 2 + 1]) * S;
-      if (rp > m.rP) m.rP = rp;
-    }
-    base += data.stripLen[s];
-  }
-}
-
+// ------------------------------------------------------- one-time setup
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -240,22 +206,19 @@ renderer.setClearColor(0x04060a);
 const scene = new THREE.Scene();
 
 // Fixed top-down plan view, pivoting on a point ~1.5 km west of the CBD.
-// The zoom is static (set once, below, to frame the peak extent): the camera
-// never rescales with the swell, so the ballooning reads at full size.
-const CENTER = new THREE.Vector3(-1500 * uUnit, 0, 0);
-const VIEW_HALF = WORLD_R * 0.82; // vertical half-extent of the frustum
+// Zoom is framed per city to the peak extent and never rescales with the
+// swell, so the ballooning reads at full size.
+const CENTER = new THREE.Vector3(0, 0, 0);
+const VIEW_HALF = WORLD_R * 0.82;
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, WORLD_R * 8);
-camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
 camera.up.set(0, 0, -1); // north up
-camera.lookAt(CENTER);
 
 const controls = new OrbitControls(camera, canvas);
-controls.target.copy(CENTER);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.enableRotate = false; // plan view stays plan view
+controls.enableRotate = false;
 controls.screenSpacePanning = true;
-controls.zoomToCursor = false; // zoom always pivots on the centre
+controls.zoomToCursor = false;
 controls.minZoom = 0.1;
 controls.maxZoom = 30;
 
@@ -263,41 +226,179 @@ controls.maxZoom = 30;
 const uniforms = {
   uHour: { value: 7.5 },
   uWarp: { value: 1 },
-  uUnit: { value: uUnit },
+  uUnit: { value: 1 },
   uTime: { value: 0 },
   uBright: { value: [1.0, 0.4, 0.85, 0.35, 0.62, 0.3, 0.42, 0.25] },
-  uCatVis: { value: [1, 1, 0, 0] }, // M and A routes on by default
+  uCatVis: { value: [1, 1, 0, 0] },
   // Peak displacement is amplified ×2.4 (?swell= to override) so congestion
   // reads as real curvature. The HUD ×N factor stays truthful.
   uSwell: { value: Math.min(4, Math.max(1, parseFloat(params.get('swell')) || 2.4)) },
 };
-const roads = new THREE.LineSegments(
-  buildRoads(data),
-  new THREE.ShaderMaterial({
-    uniforms, vertexShader, fragmentShader,
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-);
-scene.add(roads);
-if (params.get('debug') === 'parts') roads.visible = false;
+const roadMat = new THREE.ShaderMaterial({
+  uniforms, vertexShader, fragmentShader,
+  transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+});
 
-const rings = buildIsochrones(timeScale);
-scene.add(rings);
+const cbdLabel = makeLabel('· CBD', 30);
+cbdLabel.position.set(0, 0.8, 0);
+scene.add(cbdLabel);
 
-// CBD marker
-const cbd = makeLabel('· CBD', 30);
-cbd.position.set(0, 0.8, 0);
-scene.add(cbd);
+// ------------------------------------------------------------ DOM state
+const timeEl = document.getElementById('time-display');
+const phaseEl = document.getElementById('phase-display');
+const factorEl = document.getElementById('factor-display');
+const scrub = document.getElementById('scrub');
+const playBtn = document.getElementById('play');
+const warpBtn = document.getElementById('warp');
+const loaderEl = document.getElementById('loader');
+const loaderMsg = document.getElementById('loader-msg');
+const cityNameEl = document.getElementById('city-name');
+const citySubEl = document.getElementById('city-sub');
+
+// ?h=8.5 starts at 08:30, ?play=0 pauses — handy for sharing a moment.
+let hour = Math.min(24, Math.max(0, parseFloat(params.get('h')) || 7.5));
+let playing = params.get('play') !== '0';
+let warpTarget = 1;
+const DAY_SECONDS = 75; // one full day every 75 s
+scrub.valueAsNumber = hour * 60;
+
+// Route category filter: M and A signed routes by default (?cats=mabl to override).
+const catStr = (params.get('cats') || 'ma').toLowerCase();
+const catTargets = ['m', 'a', 'b', 'l'].map((c) => (catStr.includes(c) ? 1 : 0));
+uniforms.uCatVis.value = [...catTargets];
+document.querySelectorAll('#filters button').forEach((btn) => {
+  const i = Number(btn.dataset.cat);
+  btn.classList.toggle('active', catTargets[i] === 1);
+  btn.addEventListener('click', () => {
+    catTargets[i] = catTargets[i] ? 0 : 1;
+    btn.classList.toggle('active', catTargets[i] === 1);
+  });
+});
+
+// --------------------------------------------------------- city state
+let data = null;
+let uUnit = 1, timeScale = 1;
+let meanRatio = { am: 1, mid: 1, pm: 1 };
+let catMax = null;
+let roads = null, rings = null;
+let stripBase = null;
+
+function disposeGroup(g) {
+  g.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      if (o.material.map) o.material.map.dispose();
+      o.material.dispose();
+    }
+  });
+  scene.remove(g);
+}
+
+function frameCity() {
+  let peakR = data.manifest.dRef;
+  for (let i = 0; i < 4; i++) {
+    if (!catTargets[i]) continue;
+    const m = catMax[i];
+    const rShow = m.rN + uniforms.uSwell.value * (Math.max(m.rA, m.rP) - m.rN);
+    peakR = Math.max(peakR, rShow, m.rGeo);
+  }
+  const userZoom = Math.min(30, Math.max(0.1, parseFloat(params.get('zoom')) || 1));
+  camera.zoom = Math.min(1, VIEW_HALF / (peakR * uUnit)) * userZoom;
+  camera.updateProjectionMatrix();
+}
+
+async function setCity(city) {
+  loaderEl.classList.remove('done');
+  loaderMsg.textContent = `Plotting ${CITY_SUB[city]}`;
+  data = await loadData(city);
+
+  if (roads) disposeGroup(roads);
+  if (rings) disposeGroup(rings);
+
+  uUnit = WORLD_R / data.manifest.dRef;
+  timeScale = WORLD_R / data.manifest.tRef;
+  uniforms.uUnit.value = uUnit;
+
+  // HUD mean ratios
+  let sN = 0, sA = 0, sM = 0, sP = 0;
+  for (let i = 0; i < data.t[0].length; i += 23) {
+    if (data.t[0][i] < 30) continue;
+    sN += data.t[0][i]; sA += data.t[1][i]; sM += data.t[2][i]; sP += data.t[3][i];
+  }
+  meanRatio = { am: sA / sN, mid: sM / sN, pm: sP / sN };
+
+  // per-category reach (metres) for framing
+  const S = data.manifest.posScale;
+  catMax = Array.from({ length: 4 }, () => ({ rGeo: 0, rN: 0, rA: 0, rP: 0 }));
+  {
+    let base = 0;
+    for (let s = 0; s < data.stripLen.length; s++) {
+      const m = catMax[data.stripCat[s]];
+      for (let i = base; i < base + data.stripLen[s]; i++) {
+        const rg = Math.hypot(data.posGeo[i * 2], data.posGeo[i * 2 + 1]) * S;
+        if (rg > m.rGeo) m.rGeo = rg;
+        const rn = Math.hypot(data.pos[0][i * 2], data.pos[0][i * 2 + 1]) * S;
+        if (rn > m.rN) m.rN = rn;
+        const ra = Math.hypot(data.pos[1][i * 2], data.pos[1][i * 2 + 1]) * S;
+        if (ra > m.rA) m.rA = ra;
+        const rp = Math.hypot(data.pos[3][i * 2], data.pos[3][i * 2 + 1]) * S;
+        if (rp > m.rP) m.rP = rp;
+      }
+      base += data.stripLen[s];
+    }
+  }
+
+  roads = new THREE.LineSegments(buildRoads(data), roadMat);
+  if (params.get('debug') === 'parts') roads.visible = false;
+  scene.add(roads);
+  rings = buildIsochrones(timeScale);
+  scene.add(rings);
+
+  CENTER.set(-1500 * uUnit, 0, 0);
+  camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
+  camera.lookAt(CENTER);
+  controls.target.copy(CENTER);
+  frameCity();
+
+  // particles: rebuild strip offsets and reseed
+  stripBase = new Uint32Array(data.stripLen.length);
+  let b = 0;
+  for (let s = 0; s < data.stripLen.length; s++) { stripBase[s] = b; b += data.stripLen[s]; }
+  candidatesKey = '';
+  refreshCandidates(catTargets);
+  for (const p of parts) { respawn(p); p.life = Math.random() * 4; }
+  partAlpha.fill(0);
+
+  // hover: re-allocate caches
+  hoverPx = new Float32Array(data.manifest.vertexCount * 2);
+  hoverBB = new Float32Array(data.stripLen.length * 4);
+  hoverKey = '';
+  tooltip.style.display = 'none';
+
+  // chrome
+  cityNameEl.textContent = data.manifest.label;
+  citySubEl.textContent = CITY_SUB[city];
+  document.querySelectorAll('#cities button').forEach((btn) =>
+    btn.classList.toggle('active', btn.dataset.city === city)
+  );
+  const url = new URL(location);
+  if (city === 'sydney') url.searchParams.delete('city');
+  else url.searchParams.set('city', city);
+  history.replaceState(null, '', url);
+
+  loaderEl.classList.add('done');
+}
+
+document.querySelectorAll('#cities button').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (!btn.classList.contains('active')) setCity(btn.dataset.city);
+  });
+});
 
 // --------------------------------------------------------- flow particles
 // Motes advected along the warped roads at time-lapse speed; they slow on
 // congested segments, so the peaks read as crawling streams.
 const N_PART = 2600;
-const stripBase = new Uint32Array(data.stripLen.length);
-{
-  let b = 0;
-  for (let s = 0; s < data.stripLen.length; s++) { stripBase[s] = b; b += data.stripLen[s]; }
-}
 const CLASS_WEIGHT = [4, 1.5, 3, 1, 2, 0.8, 1, 0.6];
 const SPEED_KMH = [95, 60, 80, 50, 60, 45, 50, 40];
 let candidates = [], candidatesKey = '';
@@ -328,8 +429,7 @@ function vertexXY(i, wA, wM, wP, warp, swell, out) {
   out.y = gy + (sy - gy) * warp;
 }
 
-const parts = []; // { s, seg, frac, life, maxLife, cat, cls, dir }
-// place: drop onto a random road (a "hop" — keeps the life cycle running)
+const parts = [];
 function place(p) {
   const s = candidates[(Math.random() * candidates.length) | 0];
   p.s = s;
@@ -344,8 +444,7 @@ function respawn(p) {
   p.maxLife = 4 + Math.random() * 6;
   p.life = 0;
 }
-refreshCandidates([1, 1, 0, 0]);
-for (let i = 0; i < N_PART; i++) { parts.push({}); respawn(parts[i]); parts[i].life = Math.random() * 4; }
+for (let i = 0; i < N_PART; i++) parts.push({ s: 0, seg: 0, frac: 0, life: 99, maxLife: 1, cat: 0, cls: 0, dir: 1 });
 
 const partPos = new Float32Array(N_PART * 3);
 const partAlpha = new Float32Array(N_PART);
@@ -399,13 +498,13 @@ function updateParticles(dt) {
     const L = Math.max(20, Math.hypot(_pb.x - _pa.x, _pb.y - _pa.y));
     // local congestion: how much this segment's time gradient exceeds free-flow
     const dtN = Math.abs(data.t[0][ib] - data.t[0][ia]);
-    const tA2 = data.t[1], tM2 = data.t[2], tP2 = data.t[3], tN2 = data.t[0];
     const tcur = (j) =>
-      tN2[j] + wA * (tA2[j] - tN2[j]) + wM * (tM2[j] - tN2[j]) + wP * (tP2[j] - tN2[j]);
+      data.t[0][j] + wA * (data.t[1][j] - data.t[0][j]) +
+      wM * (data.t[2][j] - data.t[0][j]) + wP * (data.t[3][j] - data.t[0][j]);
     const ratio = dtN > 0.5
       ? Math.min(4, Math.max(1, Math.abs(tcur(ib) - tcur(ia)) / dtN))
       : 1;
-    const v = ((SPEED_KMH[p.cls] / 3.6) * lapse) / ratio; // metres per real second
+    const v = ((SPEED_KMH[p.cls] / 3.6) * lapse) / ratio;
     p.frac += (p.dir * v * dt) / L;
     while (p.frac > 1 || p.frac < 0) {
       p.seg += p.dir;
@@ -413,86 +512,14 @@ function updateParticles(dt) {
       p.frac += p.frac > 1 ? -1 : 1;
     }
     const f = Math.min(1, Math.max(0, p.frac));
-    const x = (_pa.x + f * (_pb.x - _pa.x)) * uUnit;
-    const z = -(_pa.y + f * (_pb.y - _pa.y)) * uUnit;
-    partPos[i * 3] = x;
+    partPos[i * 3] = (_pa.x + f * (_pb.x - _pa.x)) * uUnit;
     partPos[i * 3 + 1] = 0.4;
-    partPos[i * 3 + 2] = z;
+    partPos[i * 3 + 2] = -(_pa.y + f * (_pb.y - _pa.y)) * uUnit;
     const fade = Math.min(1, Math.min(p.life, p.maxLife - p.life) / 1.0);
     partAlpha[i] = 0.5 * fade * uniforms.uCatVis.value[p.cat] * warp;
   }
   partGeo.attributes.position.needsUpdate = true;
   partGeo.attributes.aAlpha.needsUpdate = true;
-}
-
-// ------------------------------------------------------------ controls
-const timeEl = document.getElementById('time-display');
-const phaseEl = document.getElementById('phase-display');
-const factorEl = document.getElementById('factor-display');
-const scrub = document.getElementById('scrub');
-const playBtn = document.getElementById('play');
-const warpBtn = document.getElementById('warp');
-
-// ?h=8.5 starts at 08:30, ?play=0 pauses — handy for sharing a moment.
-let hour = Math.min(24, Math.max(0, parseFloat(params.get('h')) || 7.5));
-let playing = params.get('play') !== '0';
-let warpTarget = 1;
-const DAY_SECONDS = 75; // one full day every 75 s
-scrub.valueAsNumber = hour * 60;
-playBtn.textContent = playing ? 'Pause' : 'Play';
-playBtn.classList.toggle('active', playing);
-
-// Pausing freezes time, which makes roads inspectable: the cursor becomes a
-// crosshair and a hint surfaces once — the interface teaches itself.
-function onPlayState() {
-  playBtn.textContent = playing ? 'Pause' : 'Play';
-  playBtn.classList.toggle('active', playing);
-  canvas.style.cursor = playing ? '' : 'crosshair';
-  if (playing) {
-    tooltip.style.display = 'none';
-    dismissHint();
-  } else {
-    showHint();
-  }
-}
-playBtn.addEventListener('click', () => {
-  playing = !playing;
-  onPlayState();
-});
-warpBtn.addEventListener('click', () => {
-  warpTarget = warpTarget === 1 ? 0 : 1;
-  warpBtn.textContent = warpTarget === 1 ? 'Time-warp' : 'Geographic';
-  warpBtn.classList.toggle('active', warpTarget === 1);
-});
-scrub.addEventListener('input', () => { hour = scrub.valueAsNumber / 60; });
-
-// Route category filter: M and A signed routes by default (?cats=mabl to override).
-const catStr = (params.get('cats') || 'ma').toLowerCase();
-const catTargets = ['m', 'a', 'b', 'l'].map((c) => (catStr.includes(c) ? 1 : 0));
-uniforms.uCatVis.value = [...catTargets];
-document.querySelectorAll('#filters button').forEach((btn) => {
-  const i = Number(btn.dataset.cat);
-  btn.classList.toggle('active', catTargets[i] === 1);
-  btn.addEventListener('click', () => {
-    catTargets[i] = catTargets[i] ? 0 : 1;
-    btn.classList.toggle('active', catTargets[i] === 1);
-  });
-});
-
-// Static framing: fit the peak (swollen) extent of the categories visible at
-// load. Set once — day-cycle growth then plays out on screen at full size.
-// ?zoom= multiplies on top (handy for close inspection).
-{
-  let peakR = data.manifest.dRef;
-  for (let i = 0; i < 4; i++) {
-    if (!catTargets[i]) continue;
-    const m = catMax[i];
-    const rShow = m.rN + uniforms.uSwell.value * (Math.max(m.rA, m.rP) - m.rN);
-    peakR = Math.max(peakR, rShow, m.rGeo);
-  }
-  const userZoom = Math.min(30, Math.max(0.1, parseFloat(params.get('zoom')) || 1));
-  camera.zoom = Math.min(1, VIEW_HALF / (peakR * uUnit)) * userZoom;
-  camera.updateProjectionMatrix();
 }
 
 // --------------------------------------------------------- hover inspector
@@ -507,10 +534,7 @@ const CLASS_LABEL = [
   'Primary road', 'Primary ramp', 'Secondary road', 'Secondary ramp',
 ];
 
-const V_COUNT = data.manifest.vertexCount;
-const hoverPx = new Float32Array(V_COUNT * 2); // warped vertex positions, metres
-const hoverBB = new Float32Array(data.stripLen.length * 4); // strip bounds
-let hoverKey = '';
+let hoverPx = null, hoverBB = null, hoverKey = '';
 function buildHoverCache() {
   const key = `${hour.toFixed(3)}|${uniforms.uWarp.value.toFixed(2)}|${catTargets.join('')}`;
   if (key === hoverKey) return;
@@ -549,8 +573,7 @@ function pickRoad(clientX, clientY) {
   let base = 0;
   for (let s = 0; s < data.stripLen.length; s++) {
     const n = data.stripLen[s];
-    const cat = data.stripCat[s];
-    if (catTargets[cat] &&
+    if (catTargets[data.stripCat[s]] &&
         mx >= hoverBB[s * 4] - tol && my >= hoverBB[s * 4 + 1] - tol &&
         mx <= hoverBB[s * 4 + 2] + tol && my <= hoverBB[s * 4 + 3] + tol) {
       for (let i = base; i < base + n - 1; i++) {
@@ -581,7 +604,7 @@ function dismissHint() {
 }
 
 canvas.addEventListener('pointermove', (ev) => {
-  if (playing || ev.buttons !== 0) { tooltip.style.display = 'none'; return; }
+  if (playing || !data || ev.buttons !== 0) { tooltip.style.display = 'none'; return; }
   const hit = pickRoad(ev.clientX, ev.clientY);
   if (!hit) { tooltip.style.display = 'none'; return; }
   dismissHint();
@@ -600,6 +623,31 @@ canvas.addEventListener('pointermove', (ev) => {
   tooltip.style.top = `${Math.min(ev.clientY + 16, innerHeight - 80)}px`;
 });
 canvas.addEventListener('pointerleave', () => { tooltip.style.display = 'none'; });
+
+// ------------------------------------------------------------ controls
+// Pausing freezes time, which makes roads inspectable: the cursor becomes a
+// crosshair and a hint surfaces once — the interface teaches itself.
+function onPlayState() {
+  playBtn.textContent = playing ? 'Pause' : 'Play';
+  playBtn.classList.toggle('active', playing);
+  canvas.style.cursor = playing ? '' : 'crosshair';
+  if (playing) {
+    tooltip.style.display = 'none';
+    dismissHint();
+  } else {
+    showHint();
+  }
+}
+playBtn.addEventListener('click', () => {
+  playing = !playing;
+  onPlayState();
+});
+warpBtn.addEventListener('click', () => {
+  warpTarget = warpTarget === 1 ? 0 : 1;
+  warpBtn.textContent = warpTarget === 1 ? 'Time-warp' : 'Geographic';
+  warpBtn.classList.toggle('active', warpTarget === 1);
+});
+scrub.addEventListener('input', () => { hour = scrub.valueAsNumber / 60; });
 
 function phaseFor(h) {
   if (h < 5) return ['Night', '#5a6376'];
@@ -640,6 +688,11 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
+// ----------------------------------------------------------------- boot
+const startCity = ['sydney', 'melbourne', 'brisbane'].includes(params.get('city'))
+  ? params.get('city')
+  : 'sydney';
+await setCity(startCity);
 onPlayState();
 
 const clock = new THREE.Clock();
@@ -664,5 +717,3 @@ renderer.setAnimationLoop(() => {
   controls.update();
   renderer.render(scene, camera);
 });
-
-document.getElementById('loader').classList.add('done');
