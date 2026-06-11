@@ -36,11 +36,13 @@ OpenStreetMap (Overpass API)
 - **Rings** = 15/30/45/60/90/120-minute isochrones — circles, by construction.
 - **Filters** = NSW route categories from OSM `ref` tags: M and A routes by default;
   B and unsigned local roads toggleable.
-- **Gray line** = the coastline, warped along with the roads (each coast vertex
-  borrows its nearest road junction's drive times).
+- **Swell** = peak displacement beyond free-flow is amplified ×1.6 so congestion
+  reads as curvature; the night layout and the HUD ×N factor stay truthful.
+- **Camera** = fixed top-down plan view centred on the CBD, breathing out
+  automatically as the network balloons so the whole map stays in frame.
 - Toggle **Time-warp / Geographic** to morph between the two layouts.
 - URL params: `?h=8.5` start the clock at 08:30, `?play=0` pause, `?cats=mabl`
-  pick route categories.
+  pick route categories, `?swell=2` push the exaggeration (1–3).
 
 ## Congestion model
 

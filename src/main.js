@@ -30,10 +30,6 @@ async function loadData() {
     tA: view(Uint16Array, 't_am'),
     tM: view(Uint16Array, 't_mid'),
     tP: view(Uint16Array, 't_pm'),
-    coastStripLen: view(Uint16Array, 'coastStripLen'),
-    coastTheta: view(Float32Array, 'coastTheta'),
-    coastDist: view(Uint16Array, 'coastDist'),
-    coastT: ['night', 'am', 'mid', 'pm'].map((n) => view(Uint16Array, `coastT_${n}`)),
   };
 }
 
@@ -78,7 +74,7 @@ function buildStrips({ stripLen, theta, dist, times, meta, distUnit }) {
 
 const vertexShader = /* glsl */ `
   attribute vec4 aTimes;
-  uniform float uHour, uWarp, uGeoScale, uTimeScale;
+  uniform float uHour, uWarp, uGeoScale, uTimeScale, uSwell;
   uniform float uBright[8];
   uniform float uCatVis[4];
   varying vec3 vColor;
@@ -99,25 +95,24 @@ const vertexShader = /* glsl */ `
     float wP = g(uHour, 17.5, 1.7);
     float t = tN + wA * (tA - tN) + wM * (tM - tN) + wP * (tP - tN);
 
-    float r = mix(dist * uGeoScale, t * uTimeScale, uWarp);
+    // Exaggerate the peak: amplify displacement beyond free-flow so the
+    // swelling reads as curvature, not a gentle drift. Night is untouched.
+    float tShow = tN + uSwell * (t - tN);
+
+    float r = mix(dist * uGeoScale, tShow * uTimeScale, uWarp);
     vec3 p = vec3(sin(theta) * r, 0.0, -cos(theta) * r);
 
-    #ifdef FLAT_COAST
-      vColor = vec3(0.42, 0.46, 0.52);
-      vAlpha = 0.22;
-    #else
-      // congestion: how much slower than free-flow this point currently is
-      float ratio = t / max(tN, 1.0);
-      float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
-      vec3 cool  = vec3(0.16, 0.42, 0.88);
-      vec3 amber = vec3(1.00, 0.64, 0.20);
-      vec3 ember = vec3(1.00, 0.16, 0.22);
-      vec3 col = c < 0.5 ? mix(cool, amber, c * 2.0) : mix(amber, ember, c * 2.0 - 1.0);
+    // congestion: how much slower than free-flow this point currently is
+    float ratio = t / max(tN, 1.0);
+    float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
+    vec3 cool  = vec3(0.16, 0.42, 0.88);
+    vec3 amber = vec3(1.00, 0.64, 0.20);
+    vec3 ember = vec3(1.00, 0.16, 0.22);
+    vec3 col = c < 0.5 ? mix(cool, amber, c * 2.0) : mix(amber, ember, c * 2.0 - 1.0);
 
-      float bright = uBright[cls];
-      vColor = col * bright;
-      vAlpha = (0.32 + 0.45 * bright) * uCatVis[cat];
-    #endif
+    float bright = uBright[cls];
+    vColor = col * bright;
+    vAlpha = (0.32 + 0.45 * bright) * uCatVis[cat];
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }
@@ -201,6 +196,25 @@ for (let i = 0; i < data.tN.length; i += 23) {
 }
 const meanRatio = { am: sA / sN, mid: sM / sN, pm: sP / sN };
 
+// Per-category extents (max drive time per profile + max geo distance) so the
+// auto-fit zoom knows how far the visible network reaches at any hour.
+const catMax = Array.from({ length: 4 }, () => ({ tN: 0, tA: 0, tM: 0, tP: 0, d: 0 }));
+{
+  let base = 0;
+  for (let s = 0; s < data.stripLen.length; s++) {
+    const m = catMax[data.stripCat[s]];
+    for (let i = base; i < base + data.stripLen[s]; i++) {
+      if (data.tN[i] > m.tN) m.tN = data.tN[i];
+      if (data.tA[i] > m.tA) m.tA = data.tA[i];
+      if (data.tM[i] > m.tM) m.tM = data.tM[i];
+      if (data.tP[i] > m.tP) m.tP = data.tP[i];
+      const d = data.distGeo[i] * data.manifest.distUnit;
+      if (d > m.d) m.d = d;
+    }
+    base += data.stripLen[s];
+  }
+}
+
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -208,9 +222,10 @@ renderer.setClearColor(0x04060a);
 
 const scene = new THREE.Scene();
 
-// Fixed top-down plan view. Centre sits just west of the CBD so the network
-// mass gets room without pushing the CBD off-balance.
-const CENTER = new THREE.Vector3(-WORLD_R * 0.15, 0, -WORLD_R * 0.02);
+// Fixed top-down plan view, centred on the CBD. The auto-fit zoom (in the
+// animation loop) breathes the camera out as the network balloons so the
+// whole map always stays in frame.
+const CENTER = new THREE.Vector3(0, 0, 0);
 const VIEW_HALF = WORLD_R * 0.82; // vertical half-extent of the frustum
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, WORLD_R * 8);
 camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
@@ -223,7 +238,8 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.enableRotate = false; // plan view stays plan view
 controls.screenSpacePanning = true;
-controls.minZoom = 0.45;
+controls.zoomToCursor = true;
+controls.minZoom = 0.1;
 controls.maxZoom = 10;
 
 // brightness per class: motorway, m_link, trunk, t_link, primary, p_link, secondary, s_link
@@ -234,6 +250,9 @@ const uniforms = {
   uTimeScale: { value: timeScale },
   uBright: { value: [1.0, 0.4, 0.85, 0.35, 0.62, 0.3, 0.42, 0.25] },
   uCatVis: { value: [1, 1, 0, 0] }, // M and A routes on by default
+  // Peak displacement is amplified ×1.6 (?swell= to override) so congestion
+  // reads as real curvature. The HUD ×N factor stays truthful.
+  uSwell: { value: Math.min(3, Math.max(1, parseFloat(new URLSearchParams(location.search).get('swell')) || 1.6)) },
 };
 const roadGeo = buildStrips({
   stripLen: data.stripLen,
@@ -251,24 +270,6 @@ const roads = new THREE.LineSegments(
   })
 );
 scene.add(roads);
-
-// Land/water border, warped with the network — faint gray geographic anchor.
-const coast = new THREE.LineSegments(
-  buildStrips({
-    stripLen: data.coastStripLen,
-    theta: data.coastTheta,
-    dist: data.coastDist,
-    times: data.coastT,
-    meta: null,
-    distUnit: data.manifest.distUnit,
-  }),
-  new THREE.ShaderMaterial({
-    uniforms, vertexShader, fragmentShader,
-    defines: { FLAT_COAST: 1 },
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-);
-scene.add(coast);
 
 const rings = buildIsochrones(timeScale);
 scene.add(rings);
@@ -360,6 +361,26 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
+// Auto-fit: how far the visible network currently reaches, in world units.
+function currentMaxRadius() {
+  const wA = gauss(hour, PEAKS.am);
+  const wM = gauss(hour, PEAKS.mid);
+  const wP = gauss(hour, PEAKS.pm);
+  let maxR = 1;
+  for (let i = 0; i < 4; i++) {
+    if (Math.max(catTargets[i], uniforms.uCatVis.value[i]) < 0.05) continue;
+    const m = catMax[i];
+    const t = m.tN + wA * (m.tA - m.tN) + wM * (m.tM - m.tN) + wP * (m.tP - m.tN);
+    const tShow = m.tN + uniforms.uSwell.value * (t - m.tN);
+    const r = THREE.MathUtils.lerp(
+      m.d * geoScale, tShow * timeScale, uniforms.uWarp.value
+    );
+    if (r > maxR) maxR = r;
+  }
+  return maxR;
+}
+let fit = 1, prevFit = 1;
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -373,6 +394,13 @@ renderer.setAnimationLoop(() => {
     const cv = uniforms.uCatVis.value;
     cv[i] += (catTargets[i] - cv[i]) * Math.min(1, dt * 6);
   }
+  // breathe the camera out as the network balloons (user zoom is preserved
+  // multiplicatively on top)
+  const fitTarget = Math.min(1, (VIEW_HALF * 0.94) / currentMaxRadius());
+  fit += (fitTarget - fit) * Math.min(1, dt * 3);
+  camera.zoom *= fit / prevFit;
+  prevFit = fit;
+  camera.updateProjectionMatrix();
   // isochrone rings only mean something in time-space
   const w = uniforms.uWarp.value;
   for (const m of rings.userData.mats) m.opacity = m.isSpriteMaterial ? 0.55 * w : 0.5 * w;
