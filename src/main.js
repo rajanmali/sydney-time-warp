@@ -1,5 +1,7 @@
 // Sydney Time Warp — roads positioned so distance from the CBD = drive time.
-// All warping happens in the vertex shader; JS only advances the clock.
+// The pipeline precomputes an elastic (diffusion-warped) embedding per
+// congestion profile; the vertex shader blends those embeddings through the
+// day, so the city deforms like a soft sheet. JS only advances the clock.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -10,6 +12,8 @@ const WORLD_R = 110; // world units the night-time map roughly spans
 // Mirrored in the vertex shader — keep in sync.
 const PEAKS = { am: [8.25, 1.4], mid: [13.0, 2.8], pm: [17.5, 1.7] };
 const gauss = (h, [c, s]) => Math.exp(-0.5 * ((h - c) / s) ** 2);
+
+const params = new URLSearchParams(location.search);
 
 // ---------------------------------------------------------------- data
 async function loadData() {
@@ -24,41 +28,45 @@ async function loadData() {
     stripClass: view(Uint8Array, 'stripClass'),
     stripCat: view(Uint8Array, 'stripCat'),
     stripLen: view(Uint16Array, 'stripLen'),
-    theta: view(Float32Array, 'theta'),
-    distGeo: view(Uint16Array, 'distGeo'),
-    tN: view(Uint16Array, 't_night'),
-    tA: view(Uint16Array, 't_am'),
-    tM: view(Uint16Array, 't_mid'),
-    tP: view(Uint16Array, 't_pm'),
+    posGeo: view(Int16Array, 'posGeo'),
+    pos: ['night', 'am', 'mid', 'pm'].map((n) => view(Int16Array, `pos_${n}`)),
+    t: ['night', 'am', 'mid', 'pm'].map((n) => view(Uint16Array, `t_${n}`)),
   };
 }
 
-function percentile(arr, p, stride = 37) {
-  const sample = [];
-  for (let i = 0; i < arr.length; i += stride) sample.push(arr[i]);
-  sample.sort((a, b) => a - b);
-  return sample[Math.floor(sample.length * p)];
-}
-
 // ------------------------------------------------------------ geometry
-// Turns strip arrays into LineSegments geometry.
-// position = (theta, distance in metres, meta) where meta = class + 16 × category.
-function buildStrips({ stripLen, theta, dist, times, meta, distUnit }) {
+// Strips → LineSegments. position = (geoX, geoY, meta) in metres,
+// meta = class + 16 × category. aP01 = night/am positions, aP23 = mid/pm,
+// aTimes = 4 profile drive-times (for colour).
+function buildRoads(data) {
+  const { stripClass, stripCat, stripLen, posGeo, pos, t, manifest } = data;
+  const S = manifest.posScale;
   let segVerts = 0;
   for (let s = 0; s < stripLen.length; s++) segVerts += (stripLen[s] - 1) * 2;
 
-  const pos = new Float32Array(segVerts * 3);
-  const tAttr = new Float32Array(segVerts * 4);
+  const aPos = new Float32Array(segVerts * 3);
+  const aP01 = new Float32Array(segVerts * 4);
+  const aP23 = new Float32Array(segVerts * 4);
+  const aT = new Float32Array(segVerts * 4);
 
   let v = 0, base = 0;
   for (let s = 0; s < stripLen.length; s++) {
-    const n = stripLen[s], m = meta ? meta(s) : 0;
+    const n = stripLen[s];
+    const meta = stripClass[s] + 16 * stripCat[s];
     for (let i = 0; i < n - 1; i++) {
       for (const j of [base + i, base + i + 1]) {
-        pos[v * 3] = theta[j];
-        pos[v * 3 + 1] = dist[j] * distUnit;
-        pos[v * 3 + 2] = m;
-        for (let k = 0; k < 4; k++) tAttr[v * 4 + k] = times[k][j];
+        aPos[v * 3] = posGeo[j * 2] * S;
+        aPos[v * 3 + 1] = posGeo[j * 2 + 1] * S;
+        aPos[v * 3 + 2] = meta;
+        aP01[v * 4] = pos[0][j * 2] * S;
+        aP01[v * 4 + 1] = pos[0][j * 2 + 1] * S;
+        aP01[v * 4 + 2] = pos[1][j * 2] * S;
+        aP01[v * 4 + 3] = pos[1][j * 2 + 1] * S;
+        aP23[v * 4] = pos[2][j * 2] * S;
+        aP23[v * 4 + 1] = pos[2][j * 2 + 1] * S;
+        aP23[v * 4 + 2] = pos[3][j * 2] * S;
+        aP23[v * 4 + 3] = pos[3][j * 2 + 1] * S;
+        for (let k = 0; k < 4; k++) aT[v * 4 + k] = t[k][j];
         v++;
       }
     }
@@ -66,15 +74,17 @@ function buildStrips({ stripLen, theta, dist, times, meta, distUnit }) {
   }
 
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('aTimes', new THREE.BufferAttribute(tAttr, 4));
-  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), WORLD_R * 4);
+  geo.setAttribute('position', new THREE.BufferAttribute(aPos, 3));
+  geo.setAttribute('aP01', new THREE.BufferAttribute(aP01, 4));
+  geo.setAttribute('aP23', new THREE.BufferAttribute(aP23, 4));
+  geo.setAttribute('aTimes', new THREE.BufferAttribute(aT, 4));
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), WORLD_R * 6);
   return geo;
 }
 
 const vertexShader = /* glsl */ `
-  attribute vec4 aTimes;
-  uniform float uHour, uWarp, uGeoScale, uTimeScale, uSwell;
+  attribute vec4 aP01, aP23, aTimes;
+  uniform float uHour, uWarp, uUnit, uSwell, uTime;
   uniform float uBright[8];
   uniform float uCatVis[4];
   varying vec3 vColor;
@@ -83,26 +93,32 @@ const vertexShader = /* glsl */ `
   float g(float h, float c, float s) { float d = h - c; return exp(-0.5 * d * d / (s * s)); }
 
   void main() {
-    float theta = position.x;
-    float dist  = position.y;
-    int   meta  = int(position.z + 0.5);
-    int   cls   = meta - (meta / 16) * 16;
-    int   cat   = meta / 16;
+    int meta = int(position.z + 0.5);
+    int cls  = meta - (meta / 16) * 16;
+    int cat  = meta / 16;
 
-    float tN = aTimes.x, tA = aTimes.y, tM = aTimes.z, tP = aTimes.w;
     float wA = g(uHour, 8.25, 1.4);
     float wM = g(uHour, 13.0, 2.8);
     float wP = g(uHour, 17.5, 1.7);
-    float t = tN + wA * (tA - tN) + wM * (tM - tN) + wP * (tP - tN);
 
-    // Exaggerate the peak: amplify displacement beyond free-flow so the
-    // swelling reads as curvature, not a gentle drift. Night is untouched.
-    float tShow = tN + uSwell * (t - tN);
+    // blend the four elastic embeddings, exaggerate beyond free-flow
+    vec2 pN = aP01.xy, pA = aP01.zw, pM = aP23.xy, pP = aP23.zw;
+    vec2 pBlend = pN + wA * (pA - pN) + wM * (pM - pN) + wP * (pP - pN);
+    vec2 pShow = pN + uSwell * (pBlend - pN);
+    vec2 q = mix(position.xy, pShow, uWarp);
 
-    float r = mix(dist * uGeoScale, tShow * uTimeScale, uWarp);
-    vec3 p = vec3(sin(theta) * r, 0.0, -cos(theta) * r);
+    // organic micro-undulation, proportional to how displaced this point is
+    float swellAmt = length(pShow - pN);
+    float rq = max(length(q), 1.0);
+    vec2 perp = vec2(-q.y, q.x) / rq;
+    q += perp * sin(uTime * 0.55 + (q.x + q.y) * 2.5e-4 + float(cat) * 1.7)
+              * 0.04 * swellAmt * uWarp;
+
+    vec3 p = vec3(q.x, 0.0, -q.y) * uUnit;
 
     // congestion: how much slower than free-flow this point currently is
+    float tN = aTimes.x;
+    float t = tN + wA * (aTimes.y - tN) + wM * (aTimes.z - tN) + wP * (aTimes.w - tN);
     float ratio = t / max(tN, 1.0);
     float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
     vec3 cool  = vec3(0.16, 0.42, 0.88);
@@ -182,34 +198,33 @@ const data = await loadData();
 document.getElementById('loader-msg').textContent =
   `Plotting ${data.manifest.vertexCount.toLocaleString()} points`;
 
-// Scales: night-time map spans ~WORLD_R; geographic map matches it in size.
-const tRef = percentile(data.tN, 0.995);
-const dRef = percentile(data.distGeo, 0.995) * data.manifest.distUnit;
-const timeScale = WORLD_R / tRef;
-const geoScale = WORLD_R / dRef;
+const S = data.manifest.posScale;
+const uUnit = WORLD_R / data.manifest.dRef;   // world units per metre
+const timeScale = WORLD_R / data.manifest.tRef; // world units per second (rings)
 
 // Mean profile ratios for the HUD "×N free-flow" readout.
-let sN = 0, sA = 0, sM = 0, sP = 0, count = 0;
-for (let i = 0; i < data.tN.length; i += 23) {
-  if (data.tN[i] < 30) continue;
-  sN += data.tN[i]; sA += data.tA[i]; sM += data.tM[i]; sP += data.tP[i]; count++;
+let sN = 0, sA = 0, sM = 0, sP = 0;
+for (let i = 0; i < data.t[0].length; i += 23) {
+  if (data.t[0][i] < 30) continue;
+  sN += data.t[0][i]; sA += data.t[1][i]; sM += data.t[2][i]; sP += data.t[3][i];
 }
 const meanRatio = { am: sA / sN, mid: sM / sN, pm: sP / sN };
 
-// Per-category extents (max drive time per profile + max geo distance) so the
-// auto-fit zoom knows how far the visible network reaches at any hour.
-const catMax = Array.from({ length: 4 }, () => ({ tN: 0, tA: 0, tM: 0, tP: 0, d: 0 }));
+// Per-category reach (metres) under each profile, for the static framing.
+const catMax = Array.from({ length: 4 }, () => ({ rGeo: 0, rN: 0, rA: 0, rP: 0 }));
 {
   let base = 0;
   for (let s = 0; s < data.stripLen.length; s++) {
     const m = catMax[data.stripCat[s]];
     for (let i = base; i < base + data.stripLen[s]; i++) {
-      if (data.tN[i] > m.tN) m.tN = data.tN[i];
-      if (data.tA[i] > m.tA) m.tA = data.tA[i];
-      if (data.tM[i] > m.tM) m.tM = data.tM[i];
-      if (data.tP[i] > m.tP) m.tP = data.tP[i];
-      const d = data.distGeo[i] * data.manifest.distUnit;
-      if (d > m.d) m.d = d;
+      const rg = Math.hypot(data.posGeo[i * 2], data.posGeo[i * 2 + 1]) * S;
+      if (rg > m.rGeo) m.rGeo = rg;
+      const rn = Math.hypot(data.pos[0][i * 2], data.pos[0][i * 2 + 1]) * S;
+      if (rn > m.rN) m.rN = rn;
+      const ra = Math.hypot(data.pos[1][i * 2], data.pos[1][i * 2 + 1]) * S;
+      if (ra > m.rA) m.rA = ra;
+      const rp = Math.hypot(data.pos[3][i * 2], data.pos[3][i * 2 + 1]) * S;
+      if (rp > m.rP) m.rP = rp;
     }
     base += data.stripLen[s];
   }
@@ -225,7 +240,7 @@ const scene = new THREE.Scene();
 // Fixed top-down plan view, pivoting on a point ~1.5 km west of the CBD.
 // The zoom is static (set once, below, to frame the peak extent): the camera
 // never rescales with the swell, so the ballooning reads at full size.
-const CENTER = new THREE.Vector3(-1500 * geoScale, 0, 0);
+const CENTER = new THREE.Vector3(-1500 * uUnit, 0, 0);
 const VIEW_HALF = WORLD_R * 0.82; // vertical half-extent of the frustum
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, WORLD_R * 8);
 camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
@@ -240,30 +255,22 @@ controls.enableRotate = false; // plan view stays plan view
 controls.screenSpacePanning = true;
 controls.zoomToCursor = false; // zoom always pivots on the centre
 controls.minZoom = 0.1;
-controls.maxZoom = 10;
+controls.maxZoom = 30;
 
 // brightness per class: motorway, m_link, trunk, t_link, primary, p_link, secondary, s_link
 const uniforms = {
   uHour: { value: 7.5 },
   uWarp: { value: 1 },
-  uGeoScale: { value: geoScale },
-  uTimeScale: { value: timeScale },
+  uUnit: { value: uUnit },
+  uTime: { value: 0 },
   uBright: { value: [1.0, 0.4, 0.85, 0.35, 0.62, 0.3, 0.42, 0.25] },
   uCatVis: { value: [1, 1, 0, 0] }, // M and A routes on by default
   // Peak displacement is amplified ×2.4 (?swell= to override) so congestion
   // reads as real curvature. The HUD ×N factor stays truthful.
-  uSwell: { value: Math.min(4, Math.max(1, parseFloat(new URLSearchParams(location.search).get('swell')) || 2.4)) },
+  uSwell: { value: Math.min(4, Math.max(1, parseFloat(params.get('swell')) || 2.4)) },
 };
-const roadGeo = buildStrips({
-  stripLen: data.stripLen,
-  theta: data.theta,
-  dist: data.distGeo,
-  times: [data.tN, data.tA, data.tM, data.tP],
-  meta: (s) => data.stripClass[s] + 16 * data.stripCat[s],
-  distUnit: data.manifest.distUnit,
-});
 const roads = new THREE.LineSegments(
-  roadGeo,
+  buildRoads(data),
   new THREE.ShaderMaterial({
     uniforms, vertexShader, fragmentShader,
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
@@ -288,7 +295,6 @@ const playBtn = document.getElementById('play');
 const warpBtn = document.getElementById('warp');
 
 // ?h=8.5 starts at 08:30, ?play=0 pauses — handy for sharing a moment.
-const params = new URLSearchParams(location.search);
 let hour = Math.min(24, Math.max(0, parseFloat(params.get('h')) || 7.5));
 let playing = params.get('play') !== '0';
 let warpTarget = 1;
@@ -321,6 +327,22 @@ document.querySelectorAll('#filters button').forEach((btn) => {
     btn.classList.toggle('active', catTargets[i] === 1);
   });
 });
+
+// Static framing: fit the peak (swollen) extent of the categories visible at
+// load. Set once — day-cycle growth then plays out on screen at full size.
+// ?zoom= multiplies on top (handy for close inspection).
+{
+  let peakR = data.manifest.dRef;
+  for (let i = 0; i < 4; i++) {
+    if (!catTargets[i]) continue;
+    const m = catMax[i];
+    const rShow = m.rN + uniforms.uSwell.value * (Math.max(m.rA, m.rP) - m.rN);
+    peakR = Math.max(peakR, rShow, m.rGeo);
+  }
+  const userZoom = Math.min(30, Math.max(0.1, parseFloat(params.get('zoom')) || 1));
+  camera.zoom = Math.min(1, VIEW_HALF / (peakR * uUnit)) * userZoom;
+  camera.updateProjectionMatrix();
+}
 
 function phaseFor(h) {
   if (h < 5) return ['Night', '#5a6376'];
@@ -361,21 +383,6 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
-// Static framing: fit the peak (swollen) extent of the categories visible at
-// load. Set once — day-cycle growth then plays out on screen at full size.
-{
-  let peakR = WORLD_R;
-  for (let i = 0; i < 4; i++) {
-    if (!catTargets[i]) continue;
-    const m = catMax[i];
-    const tPeak = Math.max(m.tA, m.tP);
-    const tShow = m.tN + uniforms.uSwell.value * (tPeak - m.tN);
-    peakR = Math.max(peakR, tShow * timeScale, m.d * geoScale);
-  }
-  camera.zoom = Math.min(1, VIEW_HALF / peakR);
-  camera.updateProjectionMatrix();
-}
-
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -384,6 +391,7 @@ renderer.setAnimationLoop(() => {
     scrub.valueAsNumber = hour * 60;
   }
   uniforms.uHour.value = hour;
+  uniforms.uTime.value = clock.elapsedTime;
   uniforms.uWarp.value += (warpTarget - uniforms.uWarp.value) * Math.min(1, dt * 4);
   for (let i = 0; i < 4; i++) {
     const cv = uniforms.uCatVis.value;
