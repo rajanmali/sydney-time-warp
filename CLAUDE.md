@@ -19,34 +19,47 @@ Pages can serve everything statically.
 
 ```
 scripts/
-  fetch-data.mjs   Downloads Sydney road geometry (motorway→secondary) from the
-                   OpenStreetMap Overpass API into data/raw/ (gitignored).
+  fetch-data.mjs   Downloads Sydney road geometry (motorway→secondary) and the
+                   coastline from the OpenStreetMap Overpass API into data/raw/
+                   (gitignored; existing raw files are skipped, delete to refetch).
   build-data.mjs   Builds a road graph (split ways at junctions), runs Dijkstra from
                    the CBD under 4 congestion profiles (night / AM peak / midday /
                    PM peak), then writes per-vertex records to data/sydney.bin
-                   + data/manifest.json.
+                   + data/manifest.json. Also tags strips with NSW route categories
+                   (M/A/B/other from OSM ref tags) and emits coastline strips whose
+                   vertices borrow drive times from their nearest road junction.
 data/
-  raw/             Raw Overpass response (gitignored — refetch with npm run fetch).
-  sydney.bin       Binary per-vertex data: bearing from CBD, geographic distance,
-                   and drive-time seconds under each of the 4 profiles.
-  manifest.json    Road strip offsets, classes, counts, scaling metadata.
+  raw/             Raw Overpass responses (gitignored — refetch with npm run fetch).
+  sydney.bin       Binary struct-of-arrays: road + coast strips; per vertex bearing
+                   from CBD, geographic distance, 4 drive-time anchors.
+  manifest.json    Section offsets, classes, categories, counts, scaling metadata.
 src/
   main.js          Three.js scene. All warping happens in a vertex shader: per-vertex
                    attributes (theta, geo distance, 4 drive times) + uniforms (hour,
-                   warp amount) → position. Animation is GPU-only; JS just ticks hour.
-index.html         Entry point, import map for three.js, UI chrome (clock, slider).
+                   warp amount, category visibility) → position. Animation is
+                   GPU-only; JS just ticks hour. Fixed top-down OrthographicCamera
+                   (rotation disabled). URL params: ?h= start hour, ?play=0, ?cats=.
+index.html         Entry point, import map for three.js, UI chrome (clock, slider,
+                   route filters, legend).
 ```
 
 ### Key design decisions
 
 - **Drive times are precomputed, not live.** TfNSW's live APIs need auth keys, which a
-  static page can't hold. Congestion is modelled as per-road-class travel-time
-  multipliers (informed by TfNSW traffic volume patterns) applied before Dijkstra.
+  static page can't hold. Congestion is modelled before Dijkstra.
+- **Congestion is spatially varying**, not uniform per class: each edge's multiplier =
+  class ceiling × ring profile (peaks 6–18 km from the CBD) × deterministic
+  per-corridor hash (0.7–1.3). This is what makes peaks *balloon* specific corridors
+  instead of scaling the whole map.
 - **4 profiles + client-side blending.** Storing 24 hourly times per vertex is ~5× the
   data for little visual gain. The shader blends night/AM/midday/PM anchors with
   Gaussian weights centred on 8:15, 13:00 and 17:30.
 - **Drive times only computed at junction nodes**; intermediate geometry vertices get
   times interpolated along their edge by distance fraction.
+- **Strip meta packing**: position.z = class + 16 × category; the shader decodes both.
+  Category visibility (M/A/B/other filter) is a uCatVis uniform — no rebuilds.
+- **The coastline warps too**: each coast vertex borrows its nearest junction's times,
+  so the land/water border deforms coherently with the network.
 - **The graph is undirected** (one-way streets ignored) — acceptable for a visualisation.
 
 ## Commands
