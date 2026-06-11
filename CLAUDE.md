@@ -22,23 +22,28 @@ scripts/
   fetch-data.mjs   Downloads Sydney road geometry (motorway→secondary) and the
                    coastline from the OpenStreetMap Overpass API into data/raw/
                    (gitignored; existing raw files are skipped, delete to refetch).
-  build-data.mjs   Builds a road graph (split ways at junctions), runs Dijkstra from
-                   the CBD under 4 congestion profiles (night / AM peak / midday /
-                   PM peak), then writes per-vertex records to data/sydney.bin
-                   + data/manifest.json. Also tags strips with NSW route categories
-                   (M/A/B/other from OSM ref tags) and emits coastline strips whose
-                   vertices borrow drive times from their nearest road junction.
+  build-data.mjs   Snaps nodes to 75 m clusters (merging dual carriageways), splits
+                   ways into edges between junction clusters with endpoints glued to
+                   centroids, runs Dijkstra from the CBD under 4 congestion profiles,
+                   then computes an *elastic embedding* per profile: radial targets
+                   at junctions, displacement field diffused over the graph (30
+                   Jacobi iterations, λ=0.5, CBD pinned). Writes per-vertex
+                   geographic + 4 warped positions + 4 drive times to data/sydney.bin
+                   + data/manifest.json. Strips carry NSW route categories
+                   (M/A/B/other from OSM ref tags).
 data/
   raw/             Raw Overpass responses (gitignored — refetch with npm run fetch).
   sydney.bin       Binary struct-of-arrays: road + coast strips; per vertex bearing
                    from CBD, geographic distance, 4 drive-time anchors.
   manifest.json    Section offsets, classes, categories, counts, scaling metadata.
 src/
-  main.js          Three.js scene. All warping happens in a vertex shader: per-vertex
-                   attributes (theta, geo distance, 4 drive times) + uniforms (hour,
-                   warp amount, category visibility) → position. Animation is
-                   GPU-only; JS just ticks hour. Fixed top-down OrthographicCamera
-                   (rotation disabled). URL params: ?h= start hour, ?play=0, ?cats=.
+  main.js          Three.js scene. The vertex shader blends the 4 precomputed
+                   elastic embeddings with Gaussian day-curve weights (+ swell
+                   extrapolation + subtle undulation) — the day cycle is GPU-only.
+                   Flow particles are advected on the CPU (mirror of the shader
+                   blend), slowed by local congestion. Fixed top-down
+                   OrthographicCamera (rotation disabled). URL params: ?h= start
+                   hour, ?play=0, ?cats=, ?swell=, ?zoom=, ?debug=parts.
 index.html         Entry point, import map for three.js, UI chrome (clock, slider,
                    route filters, legend).
 ```
@@ -49,8 +54,12 @@ index.html         Entry point, import map for three.js, UI chrome (clock, slide
   static page can't hold. Congestion is modelled before Dijkstra.
 - **Congestion is spatially varying**, not uniform per class: each edge's multiplier =
   class ceiling × ring profile (peaks 6–18 km from the CBD) × deterministic
-  per-corridor hash (0.7–1.3). This is what makes peaks *balloon* specific corridors
+  per-corridor hash (0.55–1.45). This is what makes peaks *balloon* specific corridors
   instead of scaling the whole map.
+- **The warp is an elastic embedding, not a per-vertex radial map**: junction radial
+  targets are diffused as a displacement field over the graph, so neighbours deform
+  together (smooth, organic, field-like) and intersections stay glued. A per-vertex
+  radial warp was tried first — it shears adjacent vertices apart and looks jagged.
 - **4 profiles + client-side blending.** Storing 24 hourly times per vertex is ~5× the
   data for little visual gain. The shader blends night/AM/midday/PM anchors with
   Gaussian weights centred on 8:15, 13:00 and 17:30.

@@ -20,15 +20,21 @@ Inspired by [the Manhattan original](https://x.com/cosmic_yolo_bot/status/206461
 OpenStreetMap (Overpass API)
   └─ 35k ways: motorway → secondary, Sydney metro bbox
        └─ scripts/build-data.mjs
-            ├─ split ways into 38k edges at 32k junctions
+            ├─ snap nodes to 75 m clusters (merges dual carriageways),
+            │    split into 28k edges, glue endpoints to junction centroids
             ├─ Dijkstra from the CBD × 4 congestion profiles
             │    (night free-flow · AM peak · midday · PM peak)
-            └─ data/sydney.bin — per vertex: bearing, geo distance,
-               4 drive-time anchors (2.9 MB, struct-of-arrays)
+            ├─ elastic embedding per profile: radial targets at junctions,
+            │    displacement field diffused over the graph (Laplacian /
+            │    diffusion warping) — deformation propagates locally like
+            │    a field, not globally like uniform scaling
+            └─ data/sydney.bin — per vertex: geographic position, 4 warped
+               positions, 4 drive times (3.2 MB, struct-of-arrays)
                  └─ src/main.js (Three.js)
-                      vertex shader blends the 4 anchors with Gaussian
-                      day-curve weights → radius = driveTime × scale.
-                      The day cycle never touches a buffer: 100% GPU.
+                      vertex shader blends the 4 embeddings with Gaussian
+                      day-curve weights — the city deforms like a soft
+                      elastic sheet, entirely on the GPU. Flow particles
+                      ride the warped roads, crawling where it's congested.
 ```
 
 - **Colour** = congestion (current drive time ÷ free-flow): blue → amber → ember.
@@ -43,9 +49,12 @@ OpenStreetMap (Overpass API)
 - **Camera** = fixed top-down plan view pivoting ~1.5 km west of the CBD, framed
   once to the peak extent — the camera never rescales with the swell, so the
   day-cycle growth plays out 1:1 on screen.
+- **Particles** = traffic motes advected along the warped roads at time-lapse
+  speed ÷ local congestion — the peaks read as crawling streams.
 - Toggle **Time-warp / Geographic** to morph between the two layouts.
 - URL params: `?h=8.5` start the clock at 08:30, `?play=0` pause, `?cats=mabl`
-  pick route categories, `?swell=3` push the exaggeration (1–4).
+  pick route categories, `?swell=3` push the exaggeration (1–4), `?zoom=5`
+  zoom in, `?debug=parts` particles only.
 
 ## Congestion model
 
