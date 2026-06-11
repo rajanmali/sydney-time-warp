@@ -207,20 +207,24 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setClearColor(0x04060a);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0x04060a, WORLD_R * 2.4, WORLD_R * 5.5);
 
-const camera = new THREE.PerspectiveCamera(46, 1, 1, WORLD_R * 12);
-// Sydney's network mass sits west of the CBD (the coast is east) — aim there.
-const CENTER = new THREE.Vector3(-WORLD_R * 0.3, 0, -WORLD_R * 0.05);
-camera.position.set(CENTER.x, WORLD_R * 1.55, CENTER.z + WORLD_R * 0.95);
+// Fixed top-down plan view. Centre sits just west of the CBD so the network
+// mass gets room without pushing the CBD off-balance.
+const CENTER = new THREE.Vector3(-WORLD_R * 0.15, 0, -WORLD_R * 0.02);
+const VIEW_HALF = WORLD_R * 0.82; // vertical half-extent of the frustum
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, WORLD_R * 8);
+camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
+camera.up.set(0, 0, -1); // north up
+camera.lookAt(CENTER);
 
 const controls = new OrbitControls(camera, canvas);
 controls.target.copy(CENTER);
 controls.enableDamping = true;
-controls.dampingFactor = 0.06;
-controls.maxPolarAngle = 1.42;
-controls.minDistance = WORLD_R * 0.25;
-controls.maxDistance = WORLD_R * 4;
+controls.dampingFactor = 0.08;
+controls.enableRotate = false; // plan view stays plan view
+controls.screenSpacePanning = true;
+controls.minZoom = 0.45;
+controls.maxZoom = 10;
 
 // brightness per class: motorway, m_link, trunk, t_link, primary, p_link, secondary, s_link
 const uniforms = {
@@ -346,7 +350,11 @@ function updateHud() {
 function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h, false);
-  camera.aspect = w / h;
+  const aspect = w / h;
+  camera.left = -VIEW_HALF * aspect;
+  camera.right = VIEW_HALF * aspect;
+  camera.top = VIEW_HALF;
+  camera.bottom = -VIEW_HALF;
   camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize);
