@@ -1,0 +1,26 @@
+{
+  "name": "sydney-time-warp",
+  "version": "1.0.0",
+  "description": "A day in Sydney, warped so that distance = drive time. Three.js visualisation of rush hour breathing through the road network.",
+  "type": "module",
+  "scripts": {
+    "fetch": "node scripts/fetch-data.mjs",
+    "build": "node scripts/build-data.mjs",
+    "serve": "python3 -m http.server 8000"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rajanmali/sydney-time-warp.git"
+  },
+  "keywords": [
+    "threejs",
+    "data-visualization",
+    "sydney",
+    "openstreetmap",
+    "traffic",
+    "isochrone"
+  ],
+  "author": "Rajan Mali",
+  "license": "MIT",
+  "homepage": "https://rajanmali.github.io/sydney-time-warp/"
+}
