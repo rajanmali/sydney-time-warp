@@ -8,9 +8,9 @@ rush hour, then contract at night, and the whole city breathes.
 
 **Live: <https://rajanmali.github.io/sydney-time-warp/>**
 
-| Midday | Evening peak |
+| 03:00 — free flow | 08:30 — morning peak |
 |---|---|
-| ![Midday](assets/midday.png) | ![Evening peak](assets/evening-peak.png) |
+| ![Night](assets/night.png) | ![Morning peak](assets/am-peak.png) |
 
 Inspired by [the Manhattan original](https://x.com/cosmic_yolo_bot/status/2064610059313905781).
 
@@ -34,20 +34,35 @@ OpenStreetMap (Overpass API)
 - **Colour** = congestion (current drive time ÷ free-flow): blue → amber → ember.
 - **Brightness** = road class (motorways brightest).
 - **Rings** = 15/30/45/60/90/120-minute isochrones — circles, by construction.
+- **Filters** = NSW route categories from OSM `ref` tags: M and A routes by default;
+  B and unsigned local roads toggleable.
+- **Gray line** = the coastline, warped along with the roads (each coast vertex
+  borrows its nearest road junction's drive times).
 - Toggle **Time-warp / Geographic** to morph between the two layouts.
+- URL params: `?h=8.5` start the clock at 08:30, `?play=0` pause, `?cats=mabl`
+  pick route categories.
 
 ## Congestion model
 
-A static page can't call authenticated live-traffic APIs, so congestion is modelled as
-per-road-class travel-time multipliers applied before Dijkstra, with shapes informed by
-[TfNSW traffic volume patterns](https://opendata.transport.nsw.gov.au/data/dataset/nsw-roads-traffic-volume-counts-api):
+A static page can't call authenticated live-traffic APIs, so congestion is modelled
+before Dijkstra, with shapes informed by
+[TfNSW traffic volume patterns](https://opendata.transport.nsw.gov.au/data/dataset/nsw-roads-traffic-volume-counts-api).
+Each edge's travel-time multiplier is the product of three parts, so the peaks
+balloon specific corridors instead of inflating the whole map uniformly:
 
-| Class | Night | AM peak | Midday | PM peak |
-|---|---|---|---|---|
-| Motorway | ×1.0 | ×2.1 | ×1.3 | ×2.0 |
-| Trunk | ×1.0 | ×2.0 | ×1.25 | ×1.9 |
-| Primary | ×1.0 | ×1.95 | ×1.25 | ×1.9 |
-| Secondary | ×1.0 | ×1.75 | ×1.2 | ×1.85 |
+1. **Class ceiling** — how bad that road type can get:
+
+   | Class | Night | AM peak | Midday | PM peak |
+   |---|---|---|---|---|
+   | Motorway | ×1.0 | ×2.4 | ×1.35 | ×2.3 |
+   | Trunk | ×1.0 | ×2.3 | ×1.3 | ×2.2 |
+   | Primary | ×1.0 | ×2.25 | ×1.3 | ×2.2 |
+   | Secondary | ×1.0 | ×2.0 | ×1.25 | ×2.1 |
+
+2. **Ring profile** — congestion peaks in the 6–18 km middle suburbs, easing off
+   in the compact core and at the metro fringe.
+3. **Corridor factor** — a deterministic per-corridor hash (0.7–1.3) so parallel
+   routes degrade differently and the warp turns lumpy.
 
 The graph is undirected (one-way streets ignored) — fine for a visualisation,
 wrong for a router.
