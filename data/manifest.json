@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11T07:48:54.780Z",
+  "generated": "2026-06-11T08:22:39.193Z",
   "source": "OpenStreetMap via Overpass API (ODbL)",
   "cbd": {
     "lat": -33.8688,
@@ -15,6 +15,12 @@
     "secondary",
     "secondary_link"
   ],
+  "categories": [
+    "M",
+    "A",
+    "B",
+    "other"
+  ],
   "profiles": [
     "night",
     "am",
@@ -23,42 +29,76 @@
   ],
   "stripCount": 37757,
   "vertexCount": 207307,
+  "coastStripCount": 279,
+  "coastVertexCount": 2222,
   "distUnit": 4,
   "maxDistance": 61732,
-  "maxTime": 8238,
+  "maxTime": 6540,
   "layout": {
     "stripClass": {
       "offset": 0,
       "length": 37757
     },
-    "stripLen": {
+    "stripCat": {
       "offset": 37760,
       "length": 37757
     },
+    "stripLen": {
+      "offset": 75520,
+      "length": 37757
+    },
     "theta": {
-      "offset": 113276,
+      "offset": 151036,
       "length": 207307
     },
     "distGeo": {
-      "offset": 942504,
+      "offset": 980264,
       "length": 207307
     },
     "t_night": {
-      "offset": 1357120,
+      "offset": 1394880,
       "length": 207307
     },
     "t_am": {
-      "offset": 1771736,
+      "offset": 1809496,
       "length": 207307
     },
     "t_mid": {
-      "offset": 2186352,
+      "offset": 2224112,
       "length": 207307
     },
     "t_pm": {
-      "offset": 2600968,
+      "offset": 2638728,
       "length": 207307
+    },
+    "coastStripLen": {
+      "offset": 3053344,
+      "length": 279
+    },
+    "coastTheta": {
+      "offset": 3053904,
+      "length": 2222
+    },
+    "coastDist": {
+      "offset": 3062792,
+      "length": 2222
+    },
+    "coastT_night": {
+      "offset": 3067236,
+      "length": 2222
+    },
+    "coastT_am": {
+      "offset": 3071680,
+      "length": 2222
+    },
+    "coastT_mid": {
+      "offset": 3076124,
+      "length": 2222
+    },
+    "coastT_pm": {
+      "offset": 3080568,
+      "length": 2222
     }
   },
-  "byteLength": 3015584
+  "byteLength": 3085012
 }
