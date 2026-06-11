@@ -16,10 +16,10 @@ const QUERIES = {
 way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link)$"](${BBOX});
 out geom;
 `,
-  'sydney-coast.json': `
-[out:json][timeout:300];
-way["natural"="coastline"](${BBOX});
-out geom;
+  'sydney-places.json': `
+[out:json][timeout:120];
+node["place"~"^(suburb|neighbourhood|town)$"](${BBOX});
+out;
 `,
 };
 
