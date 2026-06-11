@@ -22,6 +22,7 @@ async function loadData() {
   return {
     manifest,
     stripClass: view(Uint8Array, 'stripClass'),
+    stripCat: view(Uint8Array, 'stripCat'),
     stripLen: view(Uint16Array, 'stripLen'),
     theta: view(Float32Array, 'theta'),
     distGeo: view(Uint16Array, 'distGeo'),
@@ -40,39 +41,33 @@ function percentile(arr, p, stride = 37) {
 }
 
 // ------------------------------------------------------------ geometry
-function buildRoads(data) {
-  const { stripClass, stripLen, theta, distGeo, tN, tA, tM, tP, manifest } = data;
+// Turns strip arrays into LineSegments geometry.
+// position = (theta, distance in metres, meta) where meta = class + 16 × category.
+function buildStrips({ stripLen, theta, dist, times, meta, distUnit }) {
   let segVerts = 0;
   for (let s = 0; s < stripLen.length; s++) segVerts += (stripLen[s] - 1) * 2;
 
-  // position = (theta, distance in metres, class index); aTimes = 4 profile seconds
   const pos = new Float32Array(segVerts * 3);
-  const times = new Float32Array(segVerts * 4);
+  const tAttr = new Float32Array(segVerts * 4);
 
   let v = 0, base = 0;
-  const emit = (i) => {
-    pos[v * 3] = theta[i];
-    pos[v * 3 + 1] = distGeo[i] * manifest.distUnit;
-    pos[v * 3 + 2] = 0; // class, filled below per strip
-    times[v * 4] = tN[i];
-    times[v * 4 + 1] = tA[i];
-    times[v * 4 + 2] = tM[i];
-    times[v * 4 + 3] = tP[i];
-    v++;
-  };
   for (let s = 0; s < stripLen.length; s++) {
-    const n = stripLen[s], cls = stripClass[s], first = v;
+    const n = stripLen[s], m = meta ? meta(s) : 0;
     for (let i = 0; i < n - 1; i++) {
-      emit(base + i);
-      emit(base + i + 1);
+      for (const j of [base + i, base + i + 1]) {
+        pos[v * 3] = theta[j];
+        pos[v * 3 + 1] = dist[j] * distUnit;
+        pos[v * 3 + 2] = m;
+        for (let k = 0; k < 4; k++) tAttr[v * 4 + k] = times[k][j];
+        v++;
+      }
     }
-    for (let k = first; k < v; k++) pos[k * 3 + 2] = cls;
     base += n;
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('aTimes', new THREE.BufferAttribute(times, 4));
+  geo.setAttribute('aTimes', new THREE.BufferAttribute(tAttr, 4));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), WORLD_R * 4);
   return geo;
 }
@@ -81,6 +76,7 @@ const vertexShader = /* glsl */ `
   attribute vec4 aTimes;
   uniform float uHour, uWarp, uGeoScale, uTimeScale;
   uniform float uBright[8];
+  uniform float uCatVis[4];
   varying vec3 vColor;
   varying float vAlpha;
 
@@ -89,7 +85,9 @@ const vertexShader = /* glsl */ `
   void main() {
     float theta = position.x;
     float dist  = position.y;
-    int   cls   = int(position.z + 0.5);
+    int   meta  = int(position.z + 0.5);
+    int   cls   = meta - (meta / 16) * 16;
+    int   cat   = meta / 16;
 
     float tN = aTimes.x, tA = aTimes.y, tM = aTimes.z, tP = aTimes.w;
     float wA = g(uHour, 8.25, 1.4);
@@ -100,17 +98,22 @@ const vertexShader = /* glsl */ `
     float r = mix(dist * uGeoScale, t * uTimeScale, uWarp);
     vec3 p = vec3(sin(theta) * r, 0.0, -cos(theta) * r);
 
-    // congestion: how much slower than free-flow this point currently is
-    float ratio = t / max(tN, 1.0);
-    float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
-    vec3 cool  = vec3(0.16, 0.42, 0.88);
-    vec3 amber = vec3(1.00, 0.64, 0.20);
-    vec3 ember = vec3(1.00, 0.16, 0.22);
-    vec3 col = c < 0.5 ? mix(cool, amber, c * 2.0) : mix(amber, ember, c * 2.0 - 1.0);
+    #ifdef FLAT_COAST
+      vColor = vec3(0.42, 0.46, 0.52);
+      vAlpha = 0.22;
+    #else
+      // congestion: how much slower than free-flow this point currently is
+      float ratio = t / max(tN, 1.0);
+      float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
+      vec3 cool  = vec3(0.16, 0.42, 0.88);
+      vec3 amber = vec3(1.00, 0.64, 0.20);
+      vec3 ember = vec3(1.00, 0.16, 0.22);
+      vec3 col = c < 0.5 ? mix(cool, amber, c * 2.0) : mix(amber, ember, c * 2.0 - 1.0);
 
-    float bright = uBright[cls];
-    vColor = col * bright;
-    vAlpha = 0.32 + 0.45 * bright;
+      float bright = uBright[cls];
+      vColor = col * bright;
+      vAlpha = (0.32 + 0.45 * bright) * uCatVis[cat];
+    #endif
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }
@@ -119,7 +122,10 @@ const vertexShader = /* glsl */ `
 const fragmentShader = /* glsl */ `
   varying vec3 vColor;
   varying float vAlpha;
-  void main() { gl_FragColor = vec4(vColor, vAlpha); }
+  void main() {
+    if (vAlpha < 0.004) discard;
+    gl_FragColor = vec4(vColor, vAlpha);
+  }
 `;
 
 // ----------------------------------------------------------- hud bits
@@ -219,9 +225,18 @@ const uniforms = {
   uGeoScale: { value: geoScale },
   uTimeScale: { value: timeScale },
   uBright: { value: [1.0, 0.4, 0.85, 0.35, 0.62, 0.3, 0.42, 0.25] },
+  uCatVis: { value: [1, 1, 0, 0] }, // M and A routes on by default
 };
+const roadGeo = buildStrips({
+  stripLen: data.stripLen,
+  theta: data.theta,
+  dist: data.distGeo,
+  times: [data.tN, data.tA, data.tM, data.tP],
+  meta: (s) => data.stripClass[s] + 16 * data.stripCat[s],
+  distUnit: data.manifest.distUnit,
+});
 const roads = new THREE.LineSegments(
-  buildRoads(data),
+  roadGeo,
   new THREE.ShaderMaterial({
     uniforms, vertexShader, fragmentShader,
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
@@ -245,10 +260,15 @@ const scrub = document.getElementById('scrub');
 const playBtn = document.getElementById('play');
 const warpBtn = document.getElementById('warp');
 
-let hour = 7.5;
-let playing = true;
+// ?h=8.5 starts at 08:30, ?play=0 pauses — handy for sharing a moment.
+const params = new URLSearchParams(location.search);
+let hour = Math.min(24, Math.max(0, parseFloat(params.get('h')) || 7.5));
+let playing = params.get('play') !== '0';
 let warpTarget = 1;
 const DAY_SECONDS = 75; // one full day every 75 s
+scrub.valueAsNumber = hour * 60;
+playBtn.textContent = playing ? 'Pause' : 'Play';
+playBtn.classList.toggle('active', playing);
 
 playBtn.addEventListener('click', () => {
   playing = !playing;
@@ -261,6 +281,19 @@ warpBtn.addEventListener('click', () => {
   warpBtn.classList.toggle('active', warpTarget === 1);
 });
 scrub.addEventListener('input', () => { hour = scrub.valueAsNumber / 60; });
+
+// Route category filter: M and A signed routes by default (?cats=mabl to override).
+const catStr = (params.get('cats') || 'ma').toLowerCase();
+const catTargets = ['m', 'a', 'b', 'l'].map((c) => (catStr.includes(c) ? 1 : 0));
+uniforms.uCatVis.value = [...catTargets];
+document.querySelectorAll('#filters button').forEach((btn) => {
+  const i = Number(btn.dataset.cat);
+  btn.classList.toggle('active', catTargets[i] === 1);
+  btn.addEventListener('click', () => {
+    catTargets[i] = catTargets[i] ? 0 : 1;
+    btn.classList.toggle('active', catTargets[i] === 1);
+  });
+});
 
 function phaseFor(h) {
   if (h < 5) return ['Night', '#5a6376'];
@@ -306,6 +339,10 @@ renderer.setAnimationLoop(() => {
   }
   uniforms.uHour.value = hour;
   uniforms.uWarp.value += (warpTarget - uniforms.uWarp.value) * Math.min(1, dt * 4);
+  for (let i = 0; i < 4; i++) {
+    const cv = uniforms.uCatVis.value;
+    cv[i] += (catTargets[i] - cv[i]) * Math.min(1, dt * 6);
+  }
   // isochrone rings only mean something in time-space
   const w = uniforms.uWarp.value;
   for (const m of rings.userData.mats) m.opacity = m.isSpriteMaterial ? 0.55 * w : 0.5 * w;
