@@ -105,6 +105,58 @@ const ways = raw.elements.filter(
 );
 console.log(`${ways.length} usable ways`);
 
+// Suburb centroids for "which suburb is this road in" — nearest place node.
+const placesRaw = JSON.parse(
+  await readFile(new URL('../data/raw/sydney-places.json', import.meta.url), 'utf8')
+);
+const places = placesRaw.elements
+  .filter((e) => e.type === 'node' && e.tags?.name)
+  .map((e) => ({ name: e.tags.name, ...planar(e) }));
+const PCELL = 3000;
+const placeGrid = new Map();
+for (const p of places) {
+  const k = `${Math.floor(p.x / PCELL)}_${Math.floor(p.y / PCELL)}`;
+  if (!placeGrid.has(k)) placeGrid.set(k, []);
+  placeGrid.get(k).push(p);
+}
+function nearestPlace(q) {
+  const cx = Math.floor(q.x / PCELL), cy = Math.floor(q.y / PCELL);
+  let best = null, bestD = Infinity;
+  for (let r = 0; r <= 3; r++) {
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dy = -r; dy <= r; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        for (const p of placeGrid.get(`${cx + dx}_${cy + dy}`) || []) {
+          const d = Math.hypot(p.x - q.x, p.y - q.y);
+          if (d < bestD) { bestD = d; best = p; }
+        }
+      }
+    }
+    if (best && bestD < r * PCELL) break;
+  }
+  return best ? best.name : '';
+}
+console.log(`${places.length} suburb/place nodes`);
+
+// String tables: index 0 is always the empty string.
+function makeTable() {
+  const list = [''], index = new Map([['', 0]]);
+  return {
+    list,
+    idx(s) {
+      let i = index.get(s);
+      if (i === undefined) { i = list.length; list.push(s); index.set(s, i); }
+      return Math.min(i, 65535);
+    },
+  };
+}
+const nameTable = makeTable();
+const suburbTable = makeTable();
+const displayName = (tags) => {
+  const name = tags.name || '', ref = tags.ref || '';
+  return ref && name ? `${ref} · ${name}` : name || ref;
+};
+
 // --- 1. Cluster nodes onto a ~75 m grid ---
 const SNAP = 75; // metres
 const nodePos = new Map(); // node id -> {lat, lon}
@@ -161,7 +213,10 @@ for (const w of ways) {
     if (seenEdge.has(key)) { duplicates++; continue; } // opposite carriageway
     seenEdge.add(key);
 
-    edges.push({ a, b, cls, cat, corridor, pts, cum: null, len: 0, tt: null });
+    edges.push({
+      a, b, cls, cat, corridor, pts, cum: null, len: 0, tt: null,
+      name: displayName(w.tags),
+    });
   }
 }
 
@@ -345,6 +400,8 @@ const POS_SCALE = 8; // int16 stores metres / 8
 const stripClass = new Uint8Array(kept.length);
 const stripCat = new Uint8Array(kept.length);
 const stripLen = new Uint16Array(kept.length);
+const stripName = new Uint16Array(kept.length);
+const stripSuburb = new Uint16Array(kept.length);
 const posGeo = new Int16Array(totalVerts * 2);
 const posArr = PROFILE_NAMES.map(() => new Int16Array(totalVerts * 2));
 const tArr = PROFILE_NAMES.map(() => new Uint16Array(totalVerts)); // seconds
@@ -356,6 +413,10 @@ kept.forEach((e, s) => {
   stripClass[s] = e.cls;
   stripCat[s] = e.cat;
   stripLen[s] = e.pts.length;
+  stripName[s] = nameTable.idx(e.name);
+  stripSuburb[s] = suburbTable.idx(
+    nearestPlace(planar(e.pts[Math.floor(e.pts.length / 2)]))
+  );
   const ia = idx.get(e.a), ib = idx.get(e.b);
   for (let j = 0; j < e.pts.length; j++) {
     const g = planar(e.pts[j]);
@@ -389,6 +450,8 @@ const sections = [
   ['stripClass', stripClass],
   ['stripCat', stripCat],
   ['stripLen', stripLen],
+  ['stripName', stripName],
+  ['stripSuburb', stripSuburb],
   ['posGeo', posGeo],
   ...PROFILE_NAMES.map((n, k) => [`pos_${n}`, posArr[k]]),
   ...PROFILE_NAMES.map((n, k) => [`t_${n}`, tArr[k]]),
@@ -421,6 +484,8 @@ const manifest = {
   refSpeed: V,               // m/s mapping time → space
   maxDistance: Math.round(maxD),
   maxTime: Math.round(maxT), // seconds
+  names: nameTable.list,     // stripName indexes into this
+  suburbs: suburbTable.list, // stripSuburb indexes into this
   layout,
   byteLength: offset,
 };
