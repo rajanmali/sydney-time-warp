@@ -58,12 +58,16 @@ index.html         Entry point, import map for three.js, UI chrome (clock, slide
   times interpolated along their edge by distance fraction.
 - **Strip meta packing**: position.z = class + 16 × category; the shader decodes both.
   Category visibility (M/A/B/other filter) is a uCatVis uniform — no rebuilds.
+- **Dual carriageways are merged in the pipeline**: nodes snap to a 75 m cluster
+  grid; junction detection, the graph and edge dedupe operate on clusters, so both
+  carriageways share drive times and only one path is drawn.
 - **Peak swell is exaggerated**: the shader shows tN + uSwell·(t − tN) with
-  uSwell = 1.6 (?swell= overrides) so congestion reads as curvature. Night layout
-  and the HUD slowdown factor stay truthful.
-- **Auto-fit zoom**: per-category extents are precomputed at load; each frame the
-  visible network's blended reach drives camera.zoom so the balloon never clips the
-  viewport. User zoom survives multiplicatively.
+  uSwell = 2.4 (?swell= overrides, 1–4) so congestion reads as curvature. Night
+  layout and the HUD slowdown factor stay truthful.
+- **The camera never rescales with the swell** (a breathing auto-fit was tried and
+  removed — it cancelled the size change that is the visualisation). camera.zoom is
+  set once at load to frame the peak extent of the visible categories; the pivot is
+  fixed ~1.5 km west of the CBD and zoomToCursor is off.
 - **Coastline data exists but is not rendered** — it drew jagged artifacts where
   coast vertices fell back to pseudo-times (removed in v1.2.0; pipeline still emits
   the sections).
