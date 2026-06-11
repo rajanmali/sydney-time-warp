@@ -30,10 +30,6 @@ async function loadData() {
     tA: view(Uint16Array, 't_am'),
     tM: view(Uint16Array, 't_mid'),
     tP: view(Uint16Array, 't_pm'),
-    coastStripLen: view(Uint16Array, 'coastStripLen'),
-    coastTheta: view(Float32Array, 'coastTheta'),
-    coastDist: view(Uint16Array, 'coastDist'),
-    coastT: ['night', 'am', 'mid', 'pm'].map((n) => view(Uint16Array, `coastT_${n}`)),
   };
 }
 
@@ -102,22 +98,17 @@ const vertexShader = /* glsl */ `
     float r = mix(dist * uGeoScale, t * uTimeScale, uWarp);
     vec3 p = vec3(sin(theta) * r, 0.0, -cos(theta) * r);
 
-    #ifdef FLAT_COAST
-      vColor = vec3(0.42, 0.46, 0.52);
-      vAlpha = 0.22;
-    #else
-      // congestion: how much slower than free-flow this point currently is
-      float ratio = t / max(tN, 1.0);
-      float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
-      vec3 cool  = vec3(0.16, 0.42, 0.88);
-      vec3 amber = vec3(1.00, 0.64, 0.20);
-      vec3 ember = vec3(1.00, 0.16, 0.22);
-      vec3 col = c < 0.5 ? mix(cool, amber, c * 2.0) : mix(amber, ember, c * 2.0 - 1.0);
+    // congestion: how much slower than free-flow this point currently is
+    float ratio = t / max(tN, 1.0);
+    float c = clamp((ratio - 1.0) / 1.1, 0.0, 1.0);
+    vec3 cool  = vec3(0.16, 0.42, 0.88);
+    vec3 amber = vec3(1.00, 0.64, 0.20);
+    vec3 ember = vec3(1.00, 0.16, 0.22);
+    vec3 col = c < 0.5 ? mix(cool, amber, c * 2.0) : mix(amber, ember, c * 2.0 - 1.0);
 
-      float bright = uBright[cls];
-      vColor = col * bright;
-      vAlpha = (0.32 + 0.45 * bright) * uCatVis[cat];
-    #endif
+    float bright = uBright[cls];
+    vColor = col * bright;
+    vAlpha = (0.32 + 0.45 * bright) * uCatVis[cat];
 
     gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   }
@@ -251,24 +242,6 @@ const roads = new THREE.LineSegments(
   })
 );
 scene.add(roads);
-
-// Land/water border, warped with the network — faint gray geographic anchor.
-const coast = new THREE.LineSegments(
-  buildStrips({
-    stripLen: data.coastStripLen,
-    theta: data.coastTheta,
-    dist: data.coastDist,
-    times: data.coastT,
-    meta: null,
-    distUnit: data.manifest.distUnit,
-  }),
-  new THREE.ShaderMaterial({
-    uniforms, vertexShader, fragmentShader,
-    defines: { FLAT_COAST: 1 },
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  })
-);
-scene.add(coast);
 
 const rings = buildIsochrones(timeScale);
 scene.add(rings);
