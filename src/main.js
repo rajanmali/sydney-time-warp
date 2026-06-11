@@ -74,7 +74,7 @@ function buildStrips({ stripLen, theta, dist, times, meta, distUnit }) {
 
 const vertexShader = /* glsl */ `
   attribute vec4 aTimes;
-  uniform float uHour, uWarp, uGeoScale, uTimeScale;
+  uniform float uHour, uWarp, uGeoScale, uTimeScale, uSwell;
   uniform float uBright[8];
   uniform float uCatVis[4];
   varying vec3 vColor;
@@ -95,7 +95,11 @@ const vertexShader = /* glsl */ `
     float wP = g(uHour, 17.5, 1.7);
     float t = tN + wA * (tA - tN) + wM * (tM - tN) + wP * (tP - tN);
 
-    float r = mix(dist * uGeoScale, t * uTimeScale, uWarp);
+    // Exaggerate the peak: amplify displacement beyond free-flow so the
+    // swelling reads as curvature, not a gentle drift. Night is untouched.
+    float tShow = tN + uSwell * (t - tN);
+
+    float r = mix(dist * uGeoScale, tShow * uTimeScale, uWarp);
     vec3 p = vec3(sin(theta) * r, 0.0, -cos(theta) * r);
 
     // congestion: how much slower than free-flow this point currently is
@@ -225,6 +229,9 @@ const uniforms = {
   uTimeScale: { value: timeScale },
   uBright: { value: [1.0, 0.4, 0.85, 0.35, 0.62, 0.3, 0.42, 0.25] },
   uCatVis: { value: [1, 1, 0, 0] }, // M and A routes on by default
+  // Peak displacement is amplified ×1.6 (?swell= to override) so congestion
+  // reads as real curvature. The HUD ×N factor stays truthful.
+  uSwell: { value: Math.min(3, Math.max(1, parseFloat(new URLSearchParams(location.search).get('swell')) || 1.6)) },
 };
 const roadGeo = buildStrips({
   stripLen: data.stripLen,
