@@ -58,8 +58,15 @@ index.html         Entry point, import map for three.js, UI chrome (clock, slide
   times interpolated along their edge by distance fraction.
 - **Strip meta packing**: position.z = class + 16 × category; the shader decodes both.
   Category visibility (M/A/B/other filter) is a uCatVis uniform — no rebuilds.
-- **The coastline warps too**: each coast vertex borrows its nearest junction's times,
-  so the land/water border deforms coherently with the network.
+- **Peak swell is exaggerated**: the shader shows tN + uSwell·(t − tN) with
+  uSwell = 1.6 (?swell= overrides) so congestion reads as curvature. Night layout
+  and the HUD slowdown factor stay truthful.
+- **Auto-fit zoom**: per-category extents are precomputed at load; each frame the
+  visible network's blended reach drives camera.zoom so the balloon never clips the
+  viewport. User zoom survives multiplicatively.
+- **Coastline data exists but is not rendered** — it drew jagged artifacts where
+  coast vertices fell back to pseudo-times (removed in v1.2.0; pipeline still emits
+  the sections).
 - **The graph is undirected** (one-way streets ignored) — acceptable for a visualisation.
 
 ## Commands
