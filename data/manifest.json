@@ -1,0 +1,64 @@
+{
+  "generated": "2026-06-11T07:48:54.780Z",
+  "source": "OpenStreetMap via Overpass API (ODbL)",
+  "cbd": {
+    "lat": -33.8688,
+    "lon": 151.2093
+  },
+  "classes": [
+    "motorway",
+    "motorway_link",
+    "trunk",
+    "trunk_link",
+    "primary",
+    "primary_link",
+    "secondary",
+    "secondary_link"
+  ],
+  "profiles": [
+    "night",
+    "am",
+    "mid",
+    "pm"
+  ],
+  "stripCount": 37757,
+  "vertexCount": 207307,
+  "distUnit": 4,
+  "maxDistance": 61732,
+  "maxTime": 8238,
+  "layout": {
+    "stripClass": {
+      "offset": 0,
+      "length": 37757
+    },
+    "stripLen": {
+      "offset": 37760,
+      "length": 37757
+    },
+    "theta": {
+      "offset": 113276,
+      "length": 207307
+    },
+    "distGeo": {
+      "offset": 942504,
+      "length": 207307
+    },
+    "t_night": {
+      "offset": 1357120,
+      "length": 207307
+    },
+    "t_am": {
+      "offset": 1771736,
+      "length": 207307
+    },
+    "t_mid": {
+      "offset": 2186352,
+      "length": 207307
+    },
+    "t_pm": {
+      "offset": 2600968,
+      "length": 207307
+    }
+  },
+  "byteLength": 3015584
+}
