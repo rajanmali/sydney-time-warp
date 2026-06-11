@@ -196,6 +196,25 @@ for (let i = 0; i < data.tN.length; i += 23) {
 }
 const meanRatio = { am: sA / sN, mid: sM / sN, pm: sP / sN };
 
+// Per-category extents (max drive time per profile + max geo distance) so the
+// auto-fit zoom knows how far the visible network reaches at any hour.
+const catMax = Array.from({ length: 4 }, () => ({ tN: 0, tA: 0, tM: 0, tP: 0, d: 0 }));
+{
+  let base = 0;
+  for (let s = 0; s < data.stripLen.length; s++) {
+    const m = catMax[data.stripCat[s]];
+    for (let i = base; i < base + data.stripLen[s]; i++) {
+      if (data.tN[i] > m.tN) m.tN = data.tN[i];
+      if (data.tA[i] > m.tA) m.tA = data.tA[i];
+      if (data.tM[i] > m.tM) m.tM = data.tM[i];
+      if (data.tP[i] > m.tP) m.tP = data.tP[i];
+      const d = data.distGeo[i] * data.manifest.distUnit;
+      if (d > m.d) m.d = d;
+    }
+    base += data.stripLen[s];
+  }
+}
+
 const canvas = document.getElementById('scene');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -203,9 +222,10 @@ renderer.setClearColor(0x04060a);
 
 const scene = new THREE.Scene();
 
-// Fixed top-down plan view. Centre sits just west of the CBD so the network
-// mass gets room without pushing the CBD off-balance.
-const CENTER = new THREE.Vector3(-WORLD_R * 0.15, 0, -WORLD_R * 0.02);
+// Fixed top-down plan view, centred on the CBD. The auto-fit zoom (in the
+// animation loop) breathes the camera out as the network balloons so the
+// whole map always stays in frame.
+const CENTER = new THREE.Vector3(0, 0, 0);
 const VIEW_HALF = WORLD_R * 0.82; // vertical half-extent of the frustum
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, WORLD_R * 8);
 camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
@@ -218,7 +238,8 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.enableRotate = false; // plan view stays plan view
 controls.screenSpacePanning = true;
-controls.minZoom = 0.45;
+controls.zoomToCursor = true;
+controls.minZoom = 0.1;
 controls.maxZoom = 10;
 
 // brightness per class: motorway, m_link, trunk, t_link, primary, p_link, secondary, s_link
@@ -340,6 +361,26 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
+// Auto-fit: how far the visible network currently reaches, in world units.
+function currentMaxRadius() {
+  const wA = gauss(hour, PEAKS.am);
+  const wM = gauss(hour, PEAKS.mid);
+  const wP = gauss(hour, PEAKS.pm);
+  let maxR = 1;
+  for (let i = 0; i < 4; i++) {
+    if (Math.max(catTargets[i], uniforms.uCatVis.value[i]) < 0.05) continue;
+    const m = catMax[i];
+    const t = m.tN + wA * (m.tA - m.tN) + wM * (m.tM - m.tN) + wP * (m.tP - m.tN);
+    const tShow = m.tN + uniforms.uSwell.value * (t - m.tN);
+    const r = THREE.MathUtils.lerp(
+      m.d * geoScale, tShow * timeScale, uniforms.uWarp.value
+    );
+    if (r > maxR) maxR = r;
+  }
+  return maxR;
+}
+let fit = 1, prevFit = 1;
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
@@ -353,6 +394,13 @@ renderer.setAnimationLoop(() => {
     const cv = uniforms.uCatVis.value;
     cv[i] += (catTargets[i] - cv[i]) * Math.min(1, dt * 6);
   }
+  // breathe the camera out as the network balloons (user zoom is preserved
+  // multiplicatively on top)
+  const fitTarget = Math.min(1, (VIEW_HALF * 0.94) / currentMaxRadius());
+  fit += (fitTarget - fit) * Math.min(1, dt * 3);
+  camera.zoom *= fit / prevFit;
+  prevFit = fit;
+  camera.updateProjectionMatrix();
   // isochrone rings only mean something in time-space
   const w = uniforms.uWarp.value;
   for (const m of rings.userData.mats) m.opacity = m.isSpriteMaterial ? 0.55 * w : 0.5 * w;
