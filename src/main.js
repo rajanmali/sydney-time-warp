@@ -222,10 +222,10 @@ renderer.setClearColor(0x04060a);
 
 const scene = new THREE.Scene();
 
-// Fixed top-down plan view, centred on the CBD. The auto-fit zoom (in the
-// animation loop) breathes the camera out as the network balloons so the
-// whole map always stays in frame.
-const CENTER = new THREE.Vector3(0, 0, 0);
+// Fixed top-down plan view, pivoting on a point ~1.5 km west of the CBD.
+// The zoom is static (set once, below, to frame the peak extent): the camera
+// never rescales with the swell, so the ballooning reads at full size.
+const CENTER = new THREE.Vector3(-1500 * geoScale, 0, 0);
 const VIEW_HALF = WORLD_R * 0.82; // vertical half-extent of the frustum
 const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, WORLD_R * 8);
 camera.position.set(CENTER.x, WORLD_R * 4, CENTER.z);
@@ -238,7 +238,7 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.enableRotate = false; // plan view stays plan view
 controls.screenSpacePanning = true;
-controls.zoomToCursor = true;
+controls.zoomToCursor = false; // zoom always pivots on the centre
 controls.minZoom = 0.1;
 controls.maxZoom = 10;
 
@@ -361,25 +361,20 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 
-// Auto-fit: how far the visible network currently reaches, in world units.
-function currentMaxRadius() {
-  const wA = gauss(hour, PEAKS.am);
-  const wM = gauss(hour, PEAKS.mid);
-  const wP = gauss(hour, PEAKS.pm);
-  let maxR = 1;
+// Static framing: fit the peak (swollen) extent of the categories visible at
+// load. Set once — day-cycle growth then plays out on screen at full size.
+{
+  let peakR = WORLD_R;
   for (let i = 0; i < 4; i++) {
-    if (Math.max(catTargets[i], uniforms.uCatVis.value[i]) < 0.05) continue;
+    if (!catTargets[i]) continue;
     const m = catMax[i];
-    const t = m.tN + wA * (m.tA - m.tN) + wM * (m.tM - m.tN) + wP * (m.tP - m.tN);
-    const tShow = m.tN + uniforms.uSwell.value * (t - m.tN);
-    const r = THREE.MathUtils.lerp(
-      m.d * geoScale, tShow * timeScale, uniforms.uWarp.value
-    );
-    if (r > maxR) maxR = r;
+    const tPeak = Math.max(m.tA, m.tP);
+    const tShow = m.tN + uniforms.uSwell.value * (tPeak - m.tN);
+    peakR = Math.max(peakR, tShow * timeScale, m.d * geoScale);
   }
-  return maxR;
+  camera.zoom = Math.min(1, VIEW_HALF / peakR);
+  camera.updateProjectionMatrix();
 }
-let fit = 1, prevFit = 1;
 
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
@@ -394,13 +389,6 @@ renderer.setAnimationLoop(() => {
     const cv = uniforms.uCatVis.value;
     cv[i] += (catTargets[i] - cv[i]) * Math.min(1, dt * 6);
   }
-  // breathe the camera out as the network balloons (user zoom is preserved
-  // multiplicatively on top)
-  const fitTarget = Math.min(1, (VIEW_HALF * 0.94) / currentMaxRadius());
-  fit += (fitTarget - fit) * Math.min(1, dt * 3);
-  camera.zoom *= fit / prevFit;
-  prevFit = fit;
-  camera.updateProjectionMatrix();
   // isochrone rings only mean something in time-space
   const w = uniforms.uWarp.value;
   for (const m of rings.userData.mats) m.opacity = m.isSpriteMaterial ? 0.55 * w : 0.5 * w;
