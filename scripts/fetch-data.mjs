@@ -1,27 +1,24 @@
-// Downloads Sydney's main road network (motorway → secondary, incl. links)
-// and the coastline from the OpenStreetMap Overpass API.
-//
-// Bounding box covers the Sydney metro area: Penrith to the coast,
-// Hornsby down to Campbelltown/Sutherland.
+// Downloads each city's main road network (motorway → secondary, incl. links)
+// and its suburb/place nodes from the OpenStreetMap Overpass API.
 //
 // Existing raw files are kept (delete data/raw/* to force a refetch).
+// Usage: node scripts/fetch-data.mjs [city ...]   (default: all cities)
 
 import { mkdir, writeFile, access } from 'node:fs/promises';
+import { CITIES } from './cities.mjs';
 
-const BBOX = '-34.15,150.60,-33.55,151.35'; // south, west, north, east
-
-const QUERIES = {
-  'sydney-roads.json': `
+const queriesFor = (bbox) => ({
+  roads: `
 [out:json][timeout:300];
-way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link)$"](${BBOX});
+way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link)$"](${bbox});
 out geom;
 `,
-  'sydney-places.json': `
+  places: `
 [out:json][timeout:120];
-node["place"~"^(suburb|neighbourhood|town)$"](${BBOX});
+node["place"~"^(suburb|neighbourhood|town)$"](${bbox});
 out;
 `,
-};
+});
 
 const ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
@@ -62,18 +59,25 @@ async function fetchOverpass(query) {
   throw lastErr;
 }
 
+const wanted = process.argv.slice(2);
+const cities = wanted.length ? wanted : Object.keys(CITIES);
+
 await mkdir(new URL('../data/raw/', import.meta.url), { recursive: true });
-for (const [file, query] of Object.entries(QUERIES)) {
-  const out = new URL(`../data/raw/${file}`, import.meta.url);
-  const exists = await access(out).then(() => true, () => false);
-  if (exists) {
-    console.log(`${file} already present, skipping`);
-    continue;
+for (const city of cities) {
+  const cfg = CITIES[city];
+  if (!cfg) { console.error(`Unknown city: ${city}`); process.exit(1); }
+  const queries = queriesFor(cfg.bbox);
+  for (const [kind, query] of Object.entries(queries)) {
+    const file = `${city}-${kind}.json`;
+    const out = new URL(`../data/raw/${file}`, import.meta.url);
+    const exists = await access(out).then(() => true, () => false);
+    if (exists) {
+      console.log(`${file} already present, skipping`);
+      continue;
+    }
+    const data = await fetchOverpass(query);
+    console.log(`${file}: ${data.elements.length} elements`);
+    await writeFile(out, JSON.stringify(data));
+    await sleep(3000); // be polite to Overpass between queries
   }
-  const data = await fetchOverpass(query);
-  const ways = data.elements.filter((e) => e.type === 'way');
-  console.log(`Received ${ways.length} ways (${data.elements.length} elements)`);
-  await writeFile(out, JSON.stringify(data));
-  console.log(`Saved to ${out.pathname}`);
-  await sleep(3000); // be polite to Overpass between queries
 }
