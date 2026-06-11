@@ -1,5 +1,5 @@
 {
-  "generated": "2026-06-11T12:27:39.130Z",
+  "generated": "2026-06-11T12:52:13.634Z",
   "source": "OpenStreetMap via Overpass API (ODbL)",
   "cbd": {
     "lat": -33.8688,
@@ -29,11 +29,12 @@
   ],
   "stripCount": 28277,
   "vertexCount": 114124,
-  "coastStripCount": 279,
-  "coastVertexCount": 2222,
-  "distUnit": 4,
+  "posScale": 8,
+  "tRef": 2997,
+  "dRef": 56773,
+  "refSpeed": 18.942228618106263,
   "maxDistance": 61732,
-  "maxTime": 5725,
+  "maxTime": 6319,
   "layout": {
     "stripClass": {
       "offset": 0,
@@ -47,58 +48,42 @@
       "offset": 56560,
       "length": 28277
     },
-    "theta": {
+    "posGeo": {
       "offset": 113116,
-      "length": 114124
+      "length": 228248
     },
-    "distGeo": {
+    "pos_night": {
       "offset": 569612,
-      "length": 114124
+      "length": 228248
+    },
+    "pos_am": {
+      "offset": 1026108,
+      "length": 228248
+    },
+    "pos_mid": {
+      "offset": 1482604,
+      "length": 228248
+    },
+    "pos_pm": {
+      "offset": 1939100,
+      "length": 228248
     },
     "t_night": {
-      "offset": 797860,
+      "offset": 2395596,
       "length": 114124
     },
     "t_am": {
-      "offset": 1026108,
+      "offset": 2623844,
       "length": 114124
     },
     "t_mid": {
-      "offset": 1254356,
+      "offset": 2852092,
       "length": 114124
     },
     "t_pm": {
-      "offset": 1482604,
+      "offset": 3080340,
       "length": 114124
-    },
-    "coastStripLen": {
-      "offset": 1710852,
-      "length": 279
-    },
-    "coastTheta": {
-      "offset": 1711412,
-      "length": 2222
-    },
-    "coastDist": {
-      "offset": 1720300,
-      "length": 2222
-    },
-    "coastT_night": {
-      "offset": 1724744,
-      "length": 2222
-    },
-    "coastT_am": {
-      "offset": 1729188,
-      "length": 2222
-    },
-    "coastT_mid": {
-      "offset": 1733632,
-      "length": 2222
-    },
-    "coastT_pm": {
-      "offset": 1738076,
-      "length": 2222
     }
   },
-  "byteLength": 1742520
+  "byteLength": 3308588
 }

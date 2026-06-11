@@ -1,15 +1,21 @@
 // Builds the visualisation dataset from the raw Overpass response.
 //
-// 1. Split OSM ways into edges at junction nodes (nodes shared by ≥2 ways).
-// 2. Dijkstra from the junction nearest the CBD under 4 congestion profiles
-//    (night free-flow, AM peak, midday, PM peak). Congestion = per-road-class
-//    travel-time multipliers, modelled on TfNSW traffic volume patterns.
-// 3. For every geometry vertex on a reachable edge, emit: bearing from CBD,
-//    geographic distance, and drive-time seconds under each profile.
-//    Intermediate vertices get min(tA + along, tB + remaining) — the true
-//    shortest time assuming entry via either endpoint.
+// 1. Snap nodes to a 75 m cluster grid (merges dual carriageways), split OSM
+//    ways into edges between junction clusters, dedupe parallel edges, and
+//    glue every edge endpoint to its junction's centroid.
+// 2. Dijkstra from the CBD under 4 congestion profiles (night free-flow,
+//    AM peak, midday, PM peak). Congestion = per-edge multipliers: class
+//    ceiling × ring profile × per-corridor factor.
+// 3. Elastic embedding per profile (Laplacian / diffusion-based warping):
+//    each junction gets a radial target (bearing preserved, radius = drive
+//    time × reference speed), then the *displacement field* is diffused over
+//    the graph so neighbouring junctions deform together — a soft elastic
+//    sheet, not rigid scaling. Intermediate vertices interpolate endpoint
+//    displacements with a smoothstep, giving rounded organic curves.
 //
 // Output: data/sydney.bin (struct-of-arrays binary) + data/manifest.json.
+// Per vertex: geographic position, warped position under each profile
+// (both int16, metres/8), drive-time seconds under each profile (colour).
 
 import { readFile, writeFile } from 'node:fs/promises';
 
@@ -24,11 +30,9 @@ const CLASS_INDEX = new Map(CLASSES.map((c, i) => [c, i]));
 // Free-flow speed, km/h, by class index.
 const SPEED = [95, 60, 80, 50, 60, 45, 50, 40];
 
-// Peak travel-time multipliers per profile, by class index. These are the
-// *ceiling* for each class; the multiplier actually applied to an edge is
-// scaled by where it sits (ring distance from the CBD) and which corridor it
-// belongs to, so congestion balloons specific corridors instead of inflating
-// the whole map uniformly.
+// Peak travel-time multipliers per profile, by class index — the *ceiling*
+// for each class; the multiplier applied to an edge is scaled by ring
+// position and corridor, so peaks balloon corridors, not the whole map.
 const PROFILES = {
   night: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
   am:    [2.4, 2.0, 2.3, 1.9, 2.25, 1.8, 2.0, 1.7],
@@ -102,10 +106,6 @@ const ways = raw.elements.filter(
 console.log(`${ways.length} usable ways`);
 
 // --- 1. Cluster nodes onto a ~75 m grid ---
-// Dual carriageways are two parallel one-way OSM ways ~10–40 m apart. Snapping
-// nodes to clusters makes both carriageways share junctions (so they get the
-// same drive times) and lets us dedupe the parallel edges — each road renders
-// as one path.
 const SNAP = 75; // metres
 const nodePos = new Map(); // node id -> {lat, lon}
 for (const w of ways)
@@ -135,10 +135,7 @@ for (const w of ways) {
 }
 
 // --- 2. Split ways into edges between junction clusters, dedupe parallels ---
-// Edge: { a, b: cluster keys, cls, cat, len, pts, cum,
-//         tt: per-profile traversal seconds with spatial congestion applied }
-const edges = [];
-const junctionPos = new Map(); // cluster key -> {lat, lon}
+const edges = []; // { a, b, cls, cat, corridor, pts, cum, len, tt }
 const seenEdge = new Set();
 let duplicates = 0;
 
@@ -156,7 +153,7 @@ for (const w of ways) {
     if (!entering && !isLast) continue;
 
     const a = clusterOf(w.nodes[start]), b = cI;
-    const pts = w.geometry.slice(start, i + 1);
+    const pts = w.geometry.slice(start, i + 1).map((p) => ({ ...p }));
     start = i;
     if (a === b || pts.length < 2) continue;
 
@@ -164,24 +161,46 @@ for (const w of ways) {
     if (seenEdge.has(key)) { duplicates++; continue; } // opposite carriageway
     seenEdge.add(key);
 
-    const cum = [0];
-    for (let j = 1; j < pts.length; j++)
-      cum.push(cum[j - 1] + haversine(pts[j - 1], pts[j]));
-    const len = cum[cum.length - 1];
-    if (len === 0) continue;
-
-    const mid = pts[Math.floor(pts.length / 2)];
-    const spatial = ringFactor(haversine(mid, CBD) / 1000) * corridor;
-    const freeFlow = len / (SPEED[cls] / 3.6);
-    const tt = PROFILE_NAMES.map((n) => {
-      const mult = Math.max(1, 1 + (PROFILES[n][cls] - 1) * spatial);
-      return freeFlow * mult;
-    });
-    edges.push({ a, b, cls, cat, len, pts, cum, tt });
-    junctionPos.set(a, pts[0]);
-    junctionPos.set(b, pts[pts.length - 1]);
+    edges.push({ a, b, cls, cat, corridor, pts, cum: null, len: 0, tt: null });
   }
 }
+
+// Glue edge endpoints to junction centroids so intersections meet exactly —
+// no kinks or gaps where the cluster merge left endpoints ~tens of metres apart.
+const centroid = new Map(); // cluster -> {lat, lon, n}
+for (const e of edges) {
+  for (const [c, p] of [[e.a, e.pts[0]], [e.b, e.pts[e.pts.length - 1]]]) {
+    const acc = centroid.get(c) || { lat: 0, lon: 0, n: 0 };
+    acc.lat += p.lat; acc.lon += p.lon; acc.n++;
+    centroid.set(c, acc);
+  }
+}
+const junctionPos = new Map(); // cluster -> {lat, lon}
+for (const [c, acc] of centroid)
+  junctionPos.set(c, { lat: acc.lat / acc.n, lon: acc.lon / acc.n });
+
+const kept0 = [];
+for (const e of edges) {
+  e.pts[0] = { ...junctionPos.get(e.a) };
+  e.pts[e.pts.length - 1] = { ...junctionPos.get(e.b) };
+  const cum = [0];
+  for (let j = 1; j < e.pts.length; j++)
+    cum.push(cum[j - 1] + haversine(e.pts[j - 1], e.pts[j]));
+  e.cum = cum;
+  e.len = cum[cum.length - 1];
+  if (e.len === 0) continue;
+
+  const mid = e.pts[Math.floor(e.pts.length / 2)];
+  const spatial = ringFactor(haversine(mid, CBD) / 1000) * e.corridor;
+  const freeFlow = e.len / (SPEED[e.cls] / 3.6);
+  e.tt = PROFILE_NAMES.map((n) => {
+    const mult = Math.max(1, 1 + (PROFILES[n][e.cls] - 1) * spatial);
+    return freeFlow * mult;
+  });
+  kept0.push(e);
+}
+edges.length = 0;
+edges.push(...kept0);
 console.log(
   `${edges.length} edges, ${junctionPos.size} junctions ` +
   `(${duplicates} parallel carriageway edges merged)`
@@ -208,7 +227,6 @@ console.log(`Source junction ${ids[srcIdx]}, ${Math.round(srcBest)} m from CBD`)
 function dijkstra(profileIdx) {
   const dist = new Float64Array(N).fill(Infinity);
   dist[srcIdx] = 0;
-  // binary min-heap of [time, node]
   const heap = [[0, srcIdx]];
   const swap = (i, j) => { const t = heap[i]; heap[i] = heap[j]; heap[j] = t; };
   const push = (item) => {
@@ -253,20 +271,85 @@ PROFILE_NAMES.forEach((name, k) => {
   times[name] = dijkstra(k);
 });
 
-// --- 4. Emit per-vertex records for reachable edges ---
+// --- 4. Elastic embedding per profile (diffusion-warped displacement field) ---
+// Reference speed maps seconds → metres so the night layout matches geography
+// in scale: V = dRef / tRef (99.5th-percentile distance / night drive time).
+const jPlanar = ids.map((id) => planar(junctionPos.get(id)));
+const reachableJ = [];
+for (let i = 0; i < N; i++) if (isFinite(times.night[i])) reachableJ.push(i);
+
+const pct = (arr, p) => {
+  const s = [...arr].sort((x, y) => x - y);
+  return s[Math.floor(s.length * p)];
+};
+const tRef = pct(reachableJ.map((i) => times.night[i]), 0.995);
+const dRef = pct(reachableJ.map((i) => Math.hypot(jPlanar[i].x, jPlanar[i].y)), 0.995);
+const V = dRef / tRef; // m/s
+console.log(`tRef ${(tRef / 60).toFixed(1)} min, dRef ${(dRef / 1000).toFixed(1)} km, V ${(V * 3.6).toFixed(0)} km/h`);
+
+// neighbour lists over junction indices (reachable only)
+const nbr = Array.from({ length: N }, () => []);
+for (const e of edges) {
+  const ia = idx.get(e.a), ib = idx.get(e.b);
+  if (isFinite(times.night[ia]) && isFinite(times.night[ib])) {
+    nbr[ia].push(ib);
+    nbr[ib].push(ia);
+  }
+}
+
+// Per profile: radial target → displacement → diffuse over the graph.
+// 30 Jacobi iterations, λ=0.5: deformation propagates locally like a field.
+const DIFFUSE_ITERS = 30, LAMBDA = 0.5;
+const jPos = {}; // profile -> Float64Array(2N) warped junction positions (metres)
+for (const name of PROFILE_NAMES) {
+  const dx = new Float64Array(N), dy = new Float64Array(N);
+  for (const i of reachableJ) {
+    const g = jPlanar[i];
+    const r = Math.hypot(g.x, g.y);
+    const t = times[name][i];
+    if (r < 1) { dx[i] = 0; dy[i] = 0; continue; } // CBD anchor
+    const target = (t * V) / r;
+    dx[i] = g.x * target - g.x;
+    dy[i] = g.y * target - g.y;
+  }
+  const nx = new Float64Array(N), ny = new Float64Array(N);
+  for (let it = 0; it < DIFFUSE_ITERS; it++) {
+    for (const i of reachableJ) {
+      const nb = nbr[i];
+      if (nb.length === 0) { nx[i] = dx[i]; ny[i] = dy[i]; continue; }
+      let sx = 0, sy = 0;
+      for (const j of nb) { sx += dx[j]; sy += dy[j]; }
+      nx[i] = dx[i] + LAMBDA * (sx / nb.length - dx[i]);
+      ny[i] = dy[i] + LAMBDA * (sy / nb.length - dy[i]);
+    }
+    dx.set(nx); dy.set(ny);
+    dx[srcIdx] = 0; dy[srcIdx] = 0; // keep the CBD pinned
+  }
+  const P = new Float64Array(2 * N);
+  for (const i of reachableJ) {
+    P[2 * i] = jPlanar[i].x + dx[i];
+    P[2 * i + 1] = jPlanar[i].y + dy[i];
+  }
+  jPos[name] = P;
+  console.log(`Elastic embedding: ${name}`);
+}
+
+// --- 5. Emit per-vertex records for reachable edges ---
 const reachable = (e) =>
   isFinite(times.night[idx.get(e.a)]) && isFinite(times.night[idx.get(e.b)]);
-
 const kept = edges.filter(reachable);
 const totalVerts = kept.reduce((s, e) => s + e.pts.length, 0);
 console.log(`${kept.length} reachable edges, ${totalVerts} vertices`);
 
+const POS_SCALE = 8; // int16 stores metres / 8
 const stripClass = new Uint8Array(kept.length);
 const stripCat = new Uint8Array(kept.length);
 const stripLen = new Uint16Array(kept.length);
-const theta = new Float32Array(totalVerts);
-const distGeo = new Uint16Array(totalVerts); // metres / 4
+const posGeo = new Int16Array(totalVerts * 2);
+const posArr = PROFILE_NAMES.map(() => new Int16Array(totalVerts * 2));
 const tArr = PROFILE_NAMES.map(() => new Uint16Array(totalVerts)); // seconds
+
+const q16 = (m) => Math.max(-32767, Math.min(32767, Math.round(m / POS_SCALE)));
 
 let v = 0, maxT = 0, maxD = 0;
 kept.forEach((e, s) => {
@@ -275,102 +358,29 @@ kept.forEach((e, s) => {
   stripLen[s] = e.pts.length;
   const ia = idx.get(e.a), ib = idx.get(e.b);
   for (let j = 0; j < e.pts.length; j++) {
-    const p = planar(e.pts[j]);
-    theta[v] = Math.atan2(p.x, p.y); // bearing: 0 = north, clockwise
-    const d = Math.hypot(p.x, p.y);
-    distGeo[v] = Math.min(65535, Math.round(d / 4));
-    maxD = Math.max(maxD, d);
+    const g = planar(e.pts[j]);
+    posGeo[v * 2] = q16(g.x);
+    posGeo[v * 2 + 1] = q16(g.y);
+    maxD = Math.max(maxD, Math.hypot(g.x, g.y));
+
+    const f = e.len > 0 ? e.cum[j] / e.len : 0;
+    const sf = f * f * (3 - 2 * f); // smoothstep — rounded near junctions
     for (let k = 0; k < PROFILE_NAMES.length; k++) {
       const name = PROFILE_NAMES[k];
+      const P = jPos[name];
+      // displacement interpolated between endpoint junctions
+      const dax = P[2 * ia] - jPlanar[ia].x, day = P[2 * ia + 1] - jPlanar[ia].y;
+      const dbx = P[2 * ib] - jPlanar[ib].x, dby = P[2 * ib + 1] - jPlanar[ib].y;
+      posArr[k][v * 2] = q16(g.x + dax + sf * (dbx - dax));
+      posArr[k][v * 2 + 1] = q16(g.y + day + sf * (dby - day));
+
+      // drive time at this point, for colour
       const tau = e.tt[k];
-      const along = e.len > 0 ? e.cum[j] / e.len : 0;
-      const t = Math.min(
-        times[name][ia] + tau * along,
-        times[name][ib] + tau * (1 - along)
-      );
+      const t = Math.min(times[name][ia] + tau * f, times[name][ib] + tau * (1 - f));
       tArr[k][v] = Math.min(65535, Math.round(t));
       maxT = Math.max(maxT, t);
     }
     v++;
-  }
-});
-
-// --- 5. Coastline: warp it with the roads so the land border balloons too ---
-// Each coast vertex borrows the drive times of its nearest road junction
-// (plus a small access penalty), so the shoreline deforms coherently with
-// the network around it.
-const coastRaw = JSON.parse(
-  await readFile(new URL('../data/raw/sydney-coast.json', import.meta.url), 'utf8')
-);
-const coastWays = coastRaw.elements.filter((e) => e.type === 'way' && e.geometry);
-
-// grid index over junctions, planar metres, 1.5 km cells
-const CELL = 1500;
-const grid = new Map();
-const cellKey = (cx, cy) => cx * 100000 + cy;
-for (const [id, p] of junctionPos) {
-  if (!isFinite(times.night[idx.get(id)])) continue;
-  const q = planar(p);
-  const k = cellKey(Math.floor(q.x / CELL), Math.floor(q.y / CELL));
-  if (!grid.has(k)) grid.set(k, []);
-  grid.get(k).push({ id, x: q.x, y: q.y });
-}
-function nearestJunction(q) {
-  const cx = Math.floor(q.x / CELL), cy = Math.floor(q.y / CELL);
-  let best = null, bestD = Infinity;
-  for (let ring = 0; ring <= 5; ring++) {
-    for (let dx = -ring; dx <= ring; dx++) {
-      for (let dy = -ring; dy <= ring; dy++) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
-        for (const j of grid.get(cellKey(cx + dx, cy + dy)) || []) {
-          const d = Math.hypot(j.x - q.x, j.y - q.y);
-          if (d < bestD) { bestD = d; best = j; }
-        }
-      }
-    }
-    if (best && bestD < ring * CELL) break; // can't be beaten by farther rings
-  }
-  return best ? { id: best.id, d: bestD } : null;
-}
-
-const COAST_MIN_SPACING = 120; // metres — simplify dense coastline geometry
-const coastStrips = [];
-for (const w of coastWays) {
-  const pts = [];
-  let last = null;
-  for (const g of w.geometry) {
-    if (!last || haversine(last, g) >= COAST_MIN_SPACING) { pts.push(g); last = g; }
-  }
-  const end = w.geometry[w.geometry.length - 1];
-  if (last !== end) pts.push(end);
-  if (pts.length >= 2) coastStrips.push(pts);
-}
-const coastVerts = coastStrips.reduce((s, p) => s + p.length, 0);
-console.log(`${coastStrips.length} coast strips, ${coastVerts} vertices`);
-
-const coastStripLen = new Uint16Array(coastStrips.length);
-const coastTheta = new Float32Array(coastVerts);
-const coastDist = new Uint16Array(coastVerts);
-const coastT = PROFILE_NAMES.map(() => new Uint16Array(coastVerts));
-
-let cv = 0;
-coastStrips.forEach((pts, s) => {
-  coastStripLen[s] = pts.length;
-  for (const g of pts) {
-    const q = planar(g);
-    coastTheta[cv] = Math.atan2(q.x, q.y);
-    const dGeo = Math.hypot(q.x, q.y);
-    coastDist[cv] = Math.min(65535, Math.round(dGeo / 4));
-    const near = nearestJunction(q);
-    for (let k = 0; k < PROFILE_NAMES.length; k++) {
-      const name = PROFILE_NAMES[k];
-      // access penalty at suburban speed; pseudo-time fallback far from roads
-      const t = near
-        ? times[name][idx.get(near.id)] + near.d / (40 / 3.6)
-        : dGeo / (55 / 3.6);
-      coastT[k][cv] = Math.min(65535, Math.round(t));
-    }
-    cv++;
   }
 });
 
@@ -379,13 +389,9 @@ const sections = [
   ['stripClass', stripClass],
   ['stripCat', stripCat],
   ['stripLen', stripLen],
-  ['theta', theta],
-  ['distGeo', distGeo],
+  ['posGeo', posGeo],
+  ...PROFILE_NAMES.map((n, k) => [`pos_${n}`, posArr[k]]),
   ...PROFILE_NAMES.map((n, k) => [`t_${n}`, tArr[k]]),
-  ['coastStripLen', coastStripLen],
-  ['coastTheta', coastTheta],
-  ['coastDist', coastDist],
-  ...PROFILE_NAMES.map((n, k) => [`coastT_${n}`, coastT[k]]),
 ];
 const align = (n) => Math.ceil(n / 4) * 4;
 let offset = 0;
@@ -409,9 +415,10 @@ const manifest = {
   profiles: PROFILE_NAMES,
   stripCount: kept.length,
   vertexCount: totalVerts,
-  coastStripCount: coastStrips.length,
-  coastVertexCount: coastVerts,
-  distUnit: 4,            // distGeo/coastDist are metres / 4
+  posScale: POS_SCALE,       // positions are metres / POS_SCALE in int16
+  tRef: Math.round(tRef),    // seconds; isochrone ring scale
+  dRef: Math.round(dRef),    // metres; world-unit scale
+  refSpeed: V,               // m/s mapping time → space
   maxDistance: Math.round(maxD),
   maxTime: Math.round(maxT), // seconds
   layout,
