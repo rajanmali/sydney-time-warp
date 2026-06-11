@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-**Sydney Time Warp** — a Three.js visualisation of Sydney's road network where each
-vertex's distance from the CBD is proportional to its *drive time* from the CBD,
-not its geographic distance. As the time-of-day animates, rush hour congestion makes
-the map swell outward (morning/evening peaks) and contract at night.
+**Time Warp** — a Three.js visualisation of Australian metro road networks (Sydney,
+Melbourne, Brisbane — tabbed) where each vertex's distance from the CBD is
+proportional to its *drive time* from the CBD, not its geographic distance. As the
+time-of-day animates, rush hour congestion makes the map swell outward
+(morning/evening peaks) and contract at night.
 
 Inspired by the "A day in Manhattan, warped so that distance ≈ drive time" visualisation.
 
@@ -19,31 +20,39 @@ Pages can serve everything statically.
 
 ```
 scripts/
-  fetch-data.mjs   Downloads Sydney road geometry (motorway→secondary) and the
-                   coastline from the OpenStreetMap Overpass API into data/raw/
-                   (gitignored; existing raw files are skipped, delete to refetch).
+  cities.mjs       Per-city config: label, CBD coordinates, metro bbox.
+  fetch-data.mjs   Downloads each city's road geometry (motorway→secondary) and
+                   suburb place nodes from the OpenStreetMap Overpass API into
+                   data/raw/ (existing raw files are skipped, delete to refetch).
+                   Accepts city args; default all.
   build-data.mjs   Snaps nodes to 75 m clusters (merging dual carriageways), splits
                    ways into edges between junction clusters with endpoints glued to
                    centroids, runs Dijkstra from the CBD under 4 congestion profiles,
                    then computes an *elastic embedding* per profile: radial targets
                    at junctions, displacement field diffused over the graph (30
                    Jacobi iterations, λ=0.5, CBD pinned). Writes per-vertex
-                   geographic + 4 warped positions + 4 drive times to data/sydney.bin
-                   + data/manifest.json. Strips carry NSW route categories
-                   (M/A/B/other from OSM ref tags).
+                   geographic + 4 warped positions + 4 drive times to data/{city}.bin
+                   + data/{city}.json. Strips carry route categories (M/A/B/other
+                   from OSM ref tags), road names and nearest-suburb indices into
+                   manifest string tables. Accepts city args; default all.
 data/
   raw/             Raw Overpass responses (gitignored — refetch with npm run fetch).
-  sydney.bin       Binary struct-of-arrays: road + coast strips; per vertex bearing
-                   from CBD, geographic distance, 4 drive-time anchors.
-  manifest.json    Section offsets, classes, categories, counts, scaling metadata.
+  {city}.bin       Binary struct-of-arrays per city.
+  {city}.json      Section offsets, classes, categories, names/suburbs tables,
+                   tRef/dRef scaling metadata.
 src/
   main.js          Three.js scene. The vertex shader blends the 4 precomputed
                    elastic embeddings with Gaussian day-curve weights (+ swell
                    extrapolation + subtle undulation) — the day cycle is GPU-only.
                    Flow particles are advected on the CPU (mirror of the shader
                    blend), slowed by local congestion. Fixed top-down
-                   OrthographicCamera (rotation disabled). URL params: ?h= start
-                   hour, ?play=0, ?cats=, ?swell=, ?zoom=, ?debug=parts.
+                   OrthographicCamera (rotation disabled). setCity() swaps
+                   datasets at runtime (geometry, rings, framing, particles,
+                   hover caches rebuild; shared material/camera persist).
+                   Hover-while-paused inspector: road name, suburb, minutes to
+                   CBD, picked CPU-side against cached warped positions. URL
+                   params: ?city=, ?h=, ?play=0, ?cats=, ?swell=, ?zoom=,
+                   ?debug=parts.
 index.html         Entry point, import map for three.js, UI chrome (clock, slider,
                    route filters, legend).
 ```

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sydney Time Warp — a day where distance is drive time</title>
-<meta name="description" content="Sydney's road network, warped so that distance from the CBD equals drive time. Watch rush hour make the city swell." />
+<title>Time Warp — a day where distance is drive time · Sydney, Melbourne, Brisbane</title>
+<meta name="description" content="Australian city road networks, warped so that distance from the CBD equals drive time. Watch rush hour make the city swell." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Six+Caps&family=Spline+Sans+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
@@ -38,9 +38,12 @@
   #title { top: 28px; left: 32px; user-select: none; }
   #title h1 {
     font-family: 'Six Caps', sans-serif; font-weight: 400;
-    font-size: clamp(64px, 9vw, 124px); line-height: .82; letter-spacing: .02em;
-    color: var(--bone);
+    font-size: clamp(44px, 6vw, 92px); line-height: .95; letter-spacing: .03em;
+    color: var(--bone); white-space: nowrap;
   }
+  #cities { margin-top: 10px; display: flex; gap: 8px; }
+  #cities button { padding: 6px 12px; color: var(--dim); }
+  #cities button.active { color: var(--amber); border-color: var(--amber); }
   #title .sub {
     margin-top: 14px; max-width: 30ch;
     font-size: 11px; font-weight: 300; letter-spacing: .14em; text-transform: uppercase;
@@ -109,6 +112,27 @@
   #credits a { color: #5a6376; text-decoration: none; border-bottom: 1px solid #2a2f3a; }
   #credits a:hover { color: var(--amber); }
 
+  /* ---- hover tooltip ---- */
+  #tooltip {
+    position: fixed; z-index: 4; pointer-events: none; display: none;
+    background: rgba(8, 11, 17, .92); border: 1px solid #2a2f3a;
+    padding: 10px 14px; max-width: 280px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  }
+  #tooltip .road { font-size: 12px; color: var(--bone); letter-spacing: .04em; }
+  #tooltip .meta { margin-top: 5px; font-size: 10px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--dim); }
+  #tooltip .meta b { color: var(--amber); font-weight: 500; }
+
+  /* ---- paused hint: appears once, fades away ---- */
+  #hint {
+    position: fixed; z-index: 4; left: 50%; bottom: 72px; transform: translateX(-50%);
+    font-size: 10px; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--dim); opacity: 0; pointer-events: none; transition: opacity .6s;
+  }
+  #hint.show { opacity: 1; }
+  #hint::before { content: '⌖ '; color: var(--amber); }
+
   /* ---- loader ---- */
   #loader {
     position: fixed; inset: 0; z-index: 5; display: flex; flex-direction: column;
@@ -143,9 +167,17 @@
 
   <div id="loader"><div class="pulse"></div><div id="loader-msg">Plotting the network</div></div>
 
+  <div id="tooltip"><div class="road"></div><div class="meta"></div></div>
+  <div id="hint">time frozen — touch a road</div>
+
   <header id="title" class="hud reveal">
-    <h1>SYD—<br>NEY</h1>
-    <p class="sub">A day in Sydney, warped so that <em>distance&nbsp;=&nbsp;drive&nbsp;time</em> from the CBD. The city swells in the peaks, contracts at night.</p>
+    <h1 id="city-name">SYDNEY</h1>
+    <nav id="cities">
+      <button data-city="sydney" class="active">SYD</button>
+      <button data-city="melbourne">MEL</button>
+      <button data-city="brisbane">BNE</button>
+    </nav>
+    <p class="sub">A day in <span id="city-sub">Sydney</span>, warped so that <em>distance&nbsp;=&nbsp;drive&nbsp;time</em> from the CBD. The city swells in the peaks, contracts at night.</p>
   </header>
 
   <div id="clock" class="hud reveal">

@@ -1,6 +1,6 @@
-# Sydney Time Warp
+# Time Warp — Sydney · Melbourne · Brisbane
 
-**A day in Sydney, warped so that distance ≈ drive time.**
+**A day in the city, warped so that distance ≈ drive time.**
 
 Every road vertex is positioned at `radius = drive time from the CBD` along its true
 bearing — so the map *is* an isochrone. Drive times swell in the morning and evening
@@ -16,9 +16,12 @@ Inspired by [the Manhattan original](https://x.com/cosmic_yolo_bot/status/206461
 
 ## How it works
 
+Three metros — Sydney, Melbourne, Brisbane — switchable from the tabs under the
+title (`?city=` in the URL). Per city:
+
 ```
 OpenStreetMap (Overpass API)
-  └─ 35k ways: motorway → secondary, Sydney metro bbox
+  └─ 35k ways: motorway → secondary, metro bbox (scripts/cities.mjs)
        └─ scripts/build-data.mjs
             ├─ snap nodes to 75 m clusters (merges dual carriageways),
             │    split into 28k edges, glue endpoints to junction centroids
@@ -51,10 +54,12 @@ OpenStreetMap (Overpass API)
   day-cycle growth plays out 1:1 on screen.
 - **Particles** = traffic motes advected along the warped roads at time-lapse
   speed ÷ local congestion — the peaks read as crawling streams.
+- **Pause to inspect** = time freezes, the cursor becomes a crosshair, and
+  hovering any road shows its name, suburb, and drive time to the CBD.
 - Toggle **Time-warp / Geographic** to morph between the two layouts.
-- URL params: `?h=8.5` start the clock at 08:30, `?play=0` pause, `?cats=mabl`
-  pick route categories, `?swell=3` push the exaggeration (1–4), `?zoom=5`
-  zoom in, `?debug=parts` particles only.
+- URL params: `?city=melbourne` pick the city, `?h=8.5` start the clock at
+  08:30, `?play=0` pause, `?cats=mabl` pick route categories, `?swell=3` push
+  the exaggeration (1–4), `?zoom=5` zoom in, `?debug=parts` particles only.
 
 ## Congestion model
 
@@ -86,10 +91,13 @@ wrong for a router.
 No dependencies, no bundler. Three.js comes from a CDN import map.
 
 ```bash
-npm run fetch   # download raw OSM data from Overpass → data/raw/
-npm run build   # raw data → data/sydney.bin + data/manifest.json
+npm run fetch   # download raw OSM data from Overpass → data/raw/ (all cities)
+npm run build   # raw data → data/{city}.bin + data/{city}.json
 npm run serve   # http://localhost:8000
 ```
+
+Both scripts accept city names (`node scripts/build-data.mjs brisbane`).
+Add a city in `scripts/cities.mjs` (label, CBD, bbox) and rerun both.
 
 ## Data sources
 
