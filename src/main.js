@@ -250,9 +250,9 @@ const uniforms = {
   uTimeScale: { value: timeScale },
   uBright: { value: [1.0, 0.4, 0.85, 0.35, 0.62, 0.3, 0.42, 0.25] },
   uCatVis: { value: [1, 1, 0, 0] }, // M and A routes on by default
-  // Peak displacement is amplified ×1.6 (?swell= to override) so congestion
+  // Peak displacement is amplified ×2.4 (?swell= to override) so congestion
   // reads as real curvature. The HUD ×N factor stays truthful.
-  uSwell: { value: Math.min(3, Math.max(1, parseFloat(new URLSearchParams(location.search).get('swell')) || 1.6)) },
+  uSwell: { value: Math.min(4, Math.max(1, parseFloat(new URLSearchParams(location.search).get('swell')) || 2.4)) },
 };
 const roadGeo = buildStrips({
   stripLen: data.stripLen,
